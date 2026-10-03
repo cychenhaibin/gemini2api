@@ -1,5 +1,5 @@
 # --- Frontend Build Stage ---
-FROM node:20-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
 ARG USE_MIRROR=auto
 WORKDIR /app
 
