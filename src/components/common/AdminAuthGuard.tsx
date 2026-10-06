@@ -1,7 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Key, Globe, AlertCircle, Loader2 } from 'lucide-react';
+import { Lock, Globe, AlertCircle, Loader2, Check } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { isTauri } from '../../utils/env';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 /**
  * AdminAuthGuard
@@ -10,14 +21,15 @@ import { isTauri } from '../../utils/env';
  */
 export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const { t, i18n } = useTranslation();
-    const [isAuthenticated, setIsAuthenticated] = useState(isTauri());
+    // 开发模式下纯浏览器预览时绕过登录墙（URL 加 ?dev=1 或 localStorage 设 dev-bypass）
+    const devBypass = import.meta.env.DEV && (new URLSearchParams(window.location.search).get('dev') === '1' || localStorage.getItem('dev-bypass') === '1');
+    const [isAuthenticated, setIsAuthenticated] = useState(isTauri() || devBypass);
     const [apiKey, setApiKey] = useState('');
-    const [showLangMenu, setShowLangMenu] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
 
     useEffect(() => {
-        if (isTauri()) return;
+        if (isTauri() || devBypass) return;
 
         // 检查 Session 存储 (优先)
         const sessionKey = sessionStorage.getItem('abv_admin_api_key');
@@ -46,7 +58,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
 
         window.addEventListener('abv-unauthorized', handleUnauthorized);
         return () => window.removeEventListener('abv-unauthorized', handleUnauthorized);
-    }, []);
+    }, [devBypass]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -93,11 +105,6 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
         }
     };
 
-    const changeLanguage = (lng: string) => {
-        i18n.changeLanguage(lng);
-        setShowLangMenu(false);
-    };
-
     const languages = [
         { code: 'zh', name: '简体中文' },
         { code: 'zh-TW', name: '繁體中文' },
@@ -118,80 +125,77 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     return (
-        <div className="min-h-screen bg-slate-50 dark:bg-base-300 flex items-center justify-center p-4 relative">
-            {/* 语言切换按钮 */}
-            <div className="absolute top-8 right-8">
-                <div className="relative">
-                    <button
-                        onClick={() => setShowLangMenu(!showLangMenu)}
-                        className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-base-100 rounded-2xl shadow-sm border border-slate-100 dark:border-white/5 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-all"
-                    >
-                        <Globe className="w-4 h-4" />
-                        <span className="text-sm font-medium uppercase">{i18n.language.split('-')[0]}</span>
-                    </button>
-
-                    {showLangMenu && (
-                        <div className="absolute right-0 mt-2 w-40 bg-white dark:bg-base-100 rounded-2xl shadow-xl border border-slate-100 dark:border-white/5 py-2 z-50 animate-in fade-in zoom-in duration-200">
-                            {languages.map((lang) => (
-                                <button
-                                    key={lang.code}
-                                    onClick={() => changeLanguage(lang.code)}
-                                    className={`w-full text-left px-4 py-2 text-sm hover:bg-slate-50 dark:hover:bg-white/5 transition-colors ${i18n.language === lang.code ? 'text-blue-500 font-bold' : 'text-slate-600 dark:text-slate-300'
-                                        }`}
-                                >
-                                    {lang.name}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
+        <div className="min-h-screen flex items-center justify-center p-4 bg-background relative">
+            {/* 语言切换器 */}
+            <div className="absolute top-6 right-6">
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="sm">
+                            <Globe />
+                            <span className="uppercase font-medium">{i18n.language.split('-')[0]}</span>
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
+                        {languages.map((lang) => (
+                            <DropdownMenuItem
+                                key={lang.code}
+                                onClick={() => i18n.changeLanguage(lang.code)}
+                            >
+                                {i18n.language === lang.code && <Check />}
+                                {lang.name}
+                            </DropdownMenuItem>
+                        ))}
+                    </DropdownMenuContent>
+                </DropdownMenu>
             </div>
 
-            <div className="max-w-md w-full bg-white dark:bg-base-100 rounded-3xl shadow-xl overflow-hidden border border-slate-100 dark:border-white/5">
-                <div className="p-8">
-                    <div className="w-16 h-16 bg-blue-50 dark:bg-blue-900/20 rounded-2xl flex items-center justify-center mb-6 mx-auto">
-                        <Lock className="w-8 h-8 text-blue-500" />
+            <Card className="w-full max-w-md">
+                <CardHeader className="text-center">
+                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-muted">
+                        <Lock className="h-8 w-8" />
                     </div>
-                    <h2 className="text-2xl font-bold text-center text-slate-900 dark:text-slate-100 mb-2 font-display">{t('login.title')}</h2>
-                    <p className="text-center text-slate-500 dark:text-slate-400 mb-8 text-sm">{t('login.desc')}</p>
+                    <CardTitle className="text-2xl">{t('login.title')}</CardTitle>
+                    <CardDescription>{t('login.desc')}</CardDescription>
+                </CardHeader>
 
-                    <form onSubmit={handleLogin} className="space-y-6">
-                        <div className="relative">
-                            <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                            <input
+                <CardContent>
+                    <form onSubmit={handleLogin} className="space-y-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="apiKey">
+                                {t('login.placeholder', { defaultValue: 'API Key' })}
+                            </Label>
+                            <Input
+                                id="apiKey"
                                 type="password"
                                 placeholder={t('login.placeholder')}
-                                className={`w-full pl-12 pr-4 py-4 bg-slate-50 dark:bg-base-200 border-2 rounded-2xl focus:ring-2 focus:ring-blue-500 transition-all outline-none text-slate-900 dark:text-white ${error ? 'border-red-400' : 'border-transparent'}`}
                                 value={apiKey}
                                 onChange={(e) => { setApiKey(e.target.value); setError(''); }}
                                 autoFocus
                                 disabled={isLoading}
                             />
                         </div>
+
                         {error && (
-                            <div className="flex items-center gap-2 text-red-500 text-sm">
-                                <AlertCircle className="w-4 h-4" />
-                                <span>{error}</span>
-                            </div>
+                            <Alert variant="destructive">
+                                <AlertCircle />
+                                <AlertDescription>{error}</AlertDescription>
+                            </Alert>
                         )}
-                        <button
-                            type="submit"
-                            disabled={isLoading || !apiKey.trim()}
-                            className="w-full py-4 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 disabled:cursor-not-allowed text-white font-bold rounded-2xl shadow-lg shadow-blue-500/30 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
-                        >
-                            {isLoading ? (
-                                <>
-                                    <Loader2 className="w-5 h-5 animate-spin" />
-                                    {t('login.btn_verifying')}
-                                </>
-                            ) : (
-                                t('login.btn_login')
-                            )}
-                        </button>
+
+                        <div className="flex w-full">
+                            <Button
+                                type="submit"
+                                size="lg"
+                                disabled={isLoading || !apiKey.trim()}
+                            >
+                                {isLoading && <Loader2 className="animate-spin" />}
+                                {isLoading ? t('login.btn_verifying') : t('login.btn_login')}
+                            </Button>
+                        </div>
                     </form>
 
-                    <div className="mt-8 pt-6 border-t border-slate-50 dark:border-white/5 text-center">
-                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                    <div className="mt-6 pt-6 border-t text-center">
+                        <p className="text-xs text-muted-foreground leading-relaxed">
                             {t('login.note')}
                             <br />
                             {t('login.lookup_hint')}
@@ -199,8 +203,8 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                             {t('login.config_hint')}
                         </p>
                     </div>
-                </div>
-            </div>
+                </CardContent>
+            </Card>
         </div>
     );
 };
