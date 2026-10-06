@@ -171,6 +171,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
 
                     <Button
                         type="submit"
+                        size="default"
                         disabled={isLoading || !apiKey.trim()}
                         className="w-full rounded-full"
                     >
