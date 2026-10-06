@@ -163,7 +163,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                             onChange={(e) => { setApiKey(e.target.value); setError(''); }}
                             autoFocus
                             disabled={isLoading}
-                            className="bg-background rounded-full h-11"
+                            className="bg-background rounded-full"
                         />
                     </div>
 
@@ -173,7 +173,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                         type="submit"
                         size="default"
                         disabled={isLoading || !apiKey.trim()}
-                        className="w-full rounded-full h-11"
+                        className="w-full rounded-full"
                     >
                         {isLoading ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
