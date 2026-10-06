@@ -128,7 +128,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
             <div className="absolute top-6 right-6">
                 <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                        <Button variant="outline" size="sm">
+                        <Button className="bg-background text-foreground border border-input hover:bg-accent h-8 px-3 text-xs">
                             <Globe />
                             <span className="uppercase font-medium">{i18n.language.split('-')[0]}</span>
                         </Button>
@@ -182,7 +182,6 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
 
                         <Button
                             type="submit"
-                            size="lg"
                             className="w-full"
                             disabled={isLoading || !apiKey.trim()}
                         >
