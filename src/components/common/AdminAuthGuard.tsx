@@ -19,13 +19,17 @@ import {
  */
 export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const { t, i18n } = useTranslation();
-    const [isAuthenticated, setIsAuthenticated] = useState(isTauri());
+    // 开发模式预览：?dev=1 或 localStorage.dev-bypass=1 跳过登录
+    const devBypass = import.meta.env.DEV
+        && (new URLSearchParams(window.location.search).get('dev') === '1'
+            || localStorage.getItem('dev-bypass') === '1');
+    const [isAuthenticated, setIsAuthenticated] = useState(isTauri() || devBypass);
     const [apiKey, setApiKey] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
 
     useEffect(() => {
-        if (isTauri()) return;
+        if (isTauri() || devBypass) return;
 
         const sessionKey = sessionStorage.getItem('abv_admin_api_key');
         if (sessionKey) {
@@ -50,7 +54,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
 
         window.addEventListener('abv-unauthorized', handleUnauthorized);
         return () => window.removeEventListener('abv-unauthorized', handleUnauthorized);
-    }, []);
+    }, [devBypass]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
