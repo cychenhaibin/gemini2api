@@ -51,8 +51,8 @@ export function NavMenu({ navItems }: NavMenuProps) {
                 ))}
             </nav>
 
-            {/* 图标胶囊 (640px - 1120px) */}
-            <nav className="max-[639px]:hidden min-[1120px]:hidden flex items-center gap-1 bg-muted rounded-full p-1">
+            {/* 图标胶囊 (880px - 1120px) - Logo 显示文字 */}
+            <nav className="max-[879px]:hidden min-[1120px]:hidden flex items-center gap-1 bg-muted rounded-full p-1">
                 {visibleNavItems.map((item) => (
                     <Button
                         key={item.path}
@@ -72,9 +72,25 @@ export function NavMenu({ navItems }: NavMenuProps) {
                 ))}
             </nav>
 
-            {/* 图标胶囊 (640px - 880px) - 合并到上面那个尺寸下 */}
-            <nav className="hidden">
-                {/* 占位：保留断点一致性 */}
+            {/* 图标胶囊 (640px - 880px) - Logo 隐藏文字 */}
+            <nav className="max-[639px]:hidden min-[880px]:hidden flex items-center gap-1 bg-muted rounded-full p-1">
+                {visibleNavItems.map((item) => (
+                    <Button
+                        key={item.path}
+                        asChild
+                        size="icon"
+                        variant="ghost"
+                        className={cn(
+                            'rounded-full',
+                            isActive(location.pathname, item.path) ? activeClass : inactiveClass
+                        )}
+                        title={item.label}
+                    >
+                        <Link to={item.path} draggable="false">
+                            <item.icon className="h-5 w-5" />
+                        </Link>
+                    </Button>
+                ))}
             </nav>
 
             {/* 图标+文字下拉 (375px - 480px) */}
