@@ -128,10 +128,10 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
             <div className="absolute top-6 right-6">
                 <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                        <button className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium border border-input bg-background hover:bg-accent hover:text-accent-foreground h-8 px-3">
-                            <Globe className="h-4 w-4" />
+                        <Button variant="outline" size="sm">
+                            <Globe />
                             <span className="uppercase font-medium">{i18n.language.split('-')[0]}</span>
-                        </button>
+                        </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
                         {languages.map((lang) => (
@@ -182,6 +182,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
 
                         <Button
                             type="submit"
+                            size="lg"
                             className="w-full"
                             disabled={isLoading || !apiKey.trim()}
                         >
