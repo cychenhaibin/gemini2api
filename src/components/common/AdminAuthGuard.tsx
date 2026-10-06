@@ -163,7 +163,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                             onChange={(e) => { setApiKey(e.target.value); setError(''); }}
                             autoFocus
                             disabled={isLoading}
-                            className="bg-background"
+                            className="bg-background rounded-full"
                         />
                     </div>
 
