@@ -31,9 +31,7 @@ export function NavSettings({
     const handleLogout = () => {
         sessionStorage.removeItem('abv_admin_api_key');
         localStorage.removeItem('abv_admin_api_key');
-        localStorage.removeItem('dev-bypass');
-        // 跳转到无 dev=1 参数的 URL，避免重新登录
-        window.location.href = window.location.pathname;
+        window.location.reload();
     };
 
     return (
