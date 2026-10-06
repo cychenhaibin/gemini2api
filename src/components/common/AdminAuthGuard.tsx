@@ -180,16 +180,15 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                             </Alert>
                         )}
 
-                        <div className="grid w-full">
-                            <Button
-                                type="submit"
-                                size="lg"
-                                disabled={isLoading || !apiKey.trim()}
-                            >
-                                {isLoading && <Loader2 className="animate-spin" />}
-                                {isLoading ? t('login.btn_verifying') : t('login.btn_login')}
-                            </Button>
-                        </div>
+                        <Button
+                            type="submit"
+                            size="lg"
+                            className="w-full"
+                            disabled={isLoading || !apiKey.trim()}
+                        >
+                            {isLoading && <Loader2 className="animate-spin" />}
+                            {isLoading ? t('login.btn_verifying') : t('login.btn_login')}
+                        </Button>
                     </form>
 
                     <div className="mt-6 pt-6 border-t text-center">
