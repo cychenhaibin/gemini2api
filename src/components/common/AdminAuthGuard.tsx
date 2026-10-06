@@ -136,7 +136,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
             </div>
 
             <div className="mb-6 flex flex-col items-center gap-3 text-center">
-                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-muted">
+                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-primary text-primary-foreground">
                     <Lock className="h-5 w-5" />
                 </div>
                 <div className="space-y-1">
