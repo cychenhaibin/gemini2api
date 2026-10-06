@@ -180,7 +180,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                             </Alert>
                         )}
 
-                        <div className="flex w-full">
+                        <div className="grid w-full">
                             <Button
                                 type="submit"
                                 size="lg"
