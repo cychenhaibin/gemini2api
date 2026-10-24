@@ -7,13 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::proxy::common::client_adapter::CLIENT_ADAPTERS;
 use crate::proxy::debug_logger;
 use crate::proxy::handlers::common::{
-    apply_retry_strategy, build_token_error_headers, next_rotation_attempt, should_rotate_account,
-    FailureStatusTracker, RequestRetryState, RetryStrategy,
+    apply_retry_strategy, build_token_error_headers, is_transient_token_error,
+    next_rotation_attempt, should_rotate_account, FailureStatusTracker, RequestRetryState,
+    RetryStrategy,
 };
 use crate::proxy::mappers::gemini::{unwrap_response, wrap_request_v2};
 use crate::proxy::server::AppState;
@@ -113,6 +115,7 @@ pub async fn handle_generate(
     let mut norm_ms: f64 = 0.0;
     let mut think_fill_ms: f64 = 0.0;
     let mut ttft_ms: f64 = 0.0;
+    let mut fallback_overhead_ms: f64 = 0.0;
 
     // 1. 验证方法
     // [NEW] :countTokens 冒号语法，直接代理到上游 v1internal:countTokens
@@ -251,57 +254,79 @@ pub async fn handle_generate(
         let client_session_id = session_scope.client_id.clone();
 
         // 关键：根据 force_rotate 标志决定是否轮换账号（支持 Grace Retry 原地重试）
-        let (access_token, project_id, email, account_id, _wait_ms) =
-            if let Some(credentials) = retry_credentials.take() {
-                credentials
-            } else if config.request_type == "image_gen" {
-                drop(image_permit.take());
-                match token_manager
-                    .get_image_token(
-                        force_rotate,
-                        Some(&affinity_key),
-                        &config.final_model,
-                        &image_scheduler,
-                        request_timeout,
-                    )
-                    .await
-                {
-                    Ok((access_token, project_id, email, account_id, wait_ms, permit)) => {
-                        image_permit = Some(permit);
-                        (access_token, project_id, email, account_id, wait_ms)
-                    }
-                    Err((status, message)) => {
-                        failure_statuses.record(status);
-                        last_error = message;
-                        break;
-                    }
+        let (access_token, project_id, email, account_id, _wait_ms) = if let Some(credentials) =
+            retry_credentials.take()
+        {
+            credentials
+        } else if config.request_type == "image_gen" {
+            drop(image_permit.take());
+            match token_manager
+                .get_image_token(
+                    force_rotate,
+                    Some(&affinity_key),
+                    &config.final_model,
+                    &image_scheduler,
+                    request_timeout,
+                )
+                .await
+            {
+                Ok((access_token, project_id, email, account_id, wait_ms, permit)) => {
+                    image_permit = Some(permit);
+                    (access_token, project_id, email, account_id, wait_ms)
                 }
-            } else {
-                match token_manager
-                    .get_token(
-                        &config.request_type,
-                        force_rotate,
-                        Some(&affinity_key),
-                        &config.final_model,
-                    )
-                    .await
-                {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let headers = build_token_error_headers(
-                            Some(mapped_model.as_str()),
-                            last_email.as_deref(),
-                            &e,
+                Err((status, message)) => {
+                    failure_statuses.record(status);
+                    last_error = message;
+                    break;
+                }
+            }
+        } else {
+            let mut token_result = token_manager
+                .get_token(
+                    &config.request_type,
+                    force_rotate,
+                    Some(&affinity_key),
+                    &config.final_model,
+                )
+                .await;
+
+            if let Err(ref e) = token_result {
+                if is_transient_token_error(e) {
+                    tracing::warn!(
+                            "Token acquisition transient error ({}), retrying once with force_rotate...",
+                            e
                         );
-                        return Ok((
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            headers,
-                            format!("Token error: {}", e),
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    token_result = token_manager
+                        .get_token(
+                            &config.request_type,
+                            true,
+                            Some(&affinity_key),
+                            &config.final_model,
                         )
-                            .into_response());
-                    }
+                        .await;
                 }
-            };
+            }
+
+            match token_result {
+                Ok(t) => t,
+                Err(e) => {
+                    let headers = build_token_error_headers(
+                        Some(mapped_model.as_str()),
+                        last_email.as_deref(),
+                        &e,
+                    );
+                    return Ok((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        headers,
+                        format!("Token error: {}", e),
+                    )
+                        .into_response());
+                }
+            }
+        };
+
+        let in_flight_guard = Arc::new(token_manager.acquire_in_flight(&account_id));
 
         let mapped_model = token_manager
             .resolve_dynamic_model_for_account(&account_id, &mapped_model)
@@ -423,8 +448,14 @@ pub async fn handle_generate(
             }
         };
 
+        let effective_attempt_start = call_result.effective_attempt_start;
+        let mut fallback_attempts = call_result.fallback_attempts.clone();
+        fallback_overhead_ms = call_result.fallback_overhead_s() * 1000.0;
+        let attempts_b64 =
+            crate::proxy::handlers::common::encode_attempts_header(&fallback_attempts);
+
         // [NEW] 记录端点降级日志到 debug 文件
-        if !call_result.fallback_attempts.is_empty() && debug_logger::is_enabled(&debug_cfg) {
+        if call_result.has_fallback() && debug_logger::is_enabled(&debug_cfg) {
             let fallback_entries: Vec<serde_json::Value> = call_result
                 .fallback_attempts
                 .iter()
@@ -469,6 +500,8 @@ pub async fn handle_generate(
 
         if status.is_success() {
             token_manager.commit_session(&affinity_key, &account_id);
+            // [智能限流] 请求成功，重置该账号的连续失败计数
+            token_manager.mark_account_success(&account_id);
             // 6. 响应处理
             if is_stream {
                 use axum::body::Body;
@@ -530,7 +563,17 @@ pub async fn handle_generate(
                             tracing::warn!("[Gemini] Empty first chunk received, retrying...");
                             retry_gemini = true;
                         } else {
-                            ttft_ms = upstream_req_start.elapsed().as_micros() as f64 / 1000.0;
+                            ttft_ms = effective_attempt_start.elapsed().as_micros() as f64 / 1000.0;
+                            if let Some(effective_item) =
+                                fallback_attempts.iter_mut().find(|a| a.is_effective)
+                            {
+                                effective_item.duration_s = ttft_ms / 1000.0;
+                            }
+                            let _ = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.try_with(
+                                |holder| {
+                                    holder.set_attempts(fallback_attempts.clone());
+                                },
+                            );
                             first_chunk = Some(bytes);
                         }
                     }
@@ -563,7 +606,9 @@ pub async fn handle_generate(
                 let image_success_account = account_id.clone();
                 let image_success_model = mapped_model.clone();
                 let causal_anchor_clone = causal_anchor.clone();
+                let in_flight_guard_for_stream = Arc::clone(&in_flight_guard);
                 let stream = async_stream::stream! {
+                    let _in_flight = in_flight_guard_for_stream;
                     let _image_permit = image_permit_for_stream;
                     let mut first_data = first_chunk;
                     let mut meta_sent = false;
@@ -659,9 +704,9 @@ pub async fn handle_generate(
                         buffer.extend_from_slice(&bytes);
                         while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
                             let line_raw = buffer.split_to(pos + 1);
-                            if let Ok(line_str) = std::str::from_utf8(&line_raw) {
-                                let line = line_str.trim();
-                                if line.is_empty() { continue; }
+                            let line_str = String::from_utf8_lossy(&line_raw);
+                            let line = line_str.trim();
+                            if line.is_empty() { continue; }
 
                                 if line.starts_with("data: ") {
                                     let json_part = line.trim_start_matches("data: ").trim();
@@ -742,11 +787,6 @@ pub async fn handle_generate(
                                     // Non-data lines (comments, etc.)
                                     yield Ok::<Bytes, String>(Bytes::from(format!("{}\n\n", line)));
                                 }
-                            } else {
-                                // Non-UTF8 data? Just pass it through or skip
-                                debug!("[Gemini-SSE] Non-UTF8 line encountered");
-                                yield Ok::<Bytes, String>(line_raw.freeze());
-                            }
                         }
                     }
 
@@ -776,12 +816,21 @@ pub async fn handle_generate(
                         .header("X-Accel-Buffering", "no")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        .header("X-Upstream-Model", config.final_model.as_str())
                         .header("X-Session-Id", &client_session_id)
                         .header("X-Antigravity-Session-Id", &client_session_id)
                         .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
                         .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
                         .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
                         .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                        .header(
+                            "X-Timing-Ttft-Overhead-Ms",
+                            format!("{:.3}", fallback_overhead_ms),
+                        )
+                        .header(
+                            "X-Timing-Ttft-Attempts",
+                            attempts_b64.as_deref().unwrap_or(""),
+                        )
                         .body(body)
                         .unwrap()
                         .into_response());
@@ -796,39 +845,96 @@ pub async fn handle_generate(
                     .await
                     {
                         Ok(gemini_resp) => {
+                            let unwrapped = unwrap_response(&gemini_resp);
+                            if let Some(error_obj) = unwrapped.get("error") {
+                                let code = error_obj
+                                    .get("code")
+                                    .and_then(|c| c.as_u64())
+                                    .unwrap_or(500)
+                                    as u16;
+                                let status_code = StatusCode::from_u16(code)
+                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                                warn!(
+                                    "[{}] Stream collection received error in stream (status {}): {:?}",
+                                    session_id, status_code, error_obj
+                                );
+                                return Ok(Response::builder()
+                                    .status(status_code)
+                                    .header("Content-Type", "application/json")
+                                    .header("X-Account-Email", &email)
+                                    .header("X-Mapped-Model", &mapped_model)
+                                    .header("X-Upstream-Model", config.final_model.as_str())
+                                    .header("X-Session-Id", &client_session_id)
+                                    .header("X-Antigravity-Session-Id", &client_session_id)
+                                    .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
+                                    .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
+                                    .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
+                                    .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                                    .header(
+                                        "X-Timing-Ttft-Overhead-Ms",
+                                        format!("{:.3}", fallback_overhead_ms),
+                                    )
+                                    .body(Body::from(serde_json::to_string(&unwrapped).unwrap()))
+                                    .unwrap()
+                                    .into_response());
+                            }
+
                             info!(
                                 "[{}] ✓ Stream collected and converted to JSON (Gemini)",
                                 session_id
                             );
-                            let unwrapped = unwrap_response(&gemini_resp);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .header("Content-Type", "application/json")
                                 .header("X-Account-Email", &email)
                                 .header("X-Mapped-Model", &mapped_model)
+                                .header("X-Upstream-Model", config.final_model.as_str())
                                 .header("X-Session-Id", &client_session_id)
                                 .header("X-Antigravity-Session-Id", &client_session_id)
                                 .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
                                 .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
                                 .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
                                 .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                                .header(
+                                    "X-Timing-Ttft-Overhead-Ms",
+                                    format!("{:.3}", fallback_overhead_ms),
+                                )
                                 .body(Body::from(serde_json::to_string(&unwrapped).unwrap()))
                                 .unwrap()
                                 .into_response());
                         }
                         Err(e) => {
                             error!("Stream collection error: {}", e);
-                            return Ok((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Stream collection error: {}", e),
-                            )
+                            let error_json = serde_json::json!({
+                                "error": {
+                                    "code": 500,
+                                    "message": format!("Stream collection error: {}", e),
+                                    "status": "INTERNAL"
+                                }
+                            });
+                            return Ok(Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .header("Content-Type", "application/json")
+                                .header("X-Account-Email", &email)
+                                .header("X-Mapped-Model", &mapped_model)
+                                .header("X-Upstream-Model", config.final_model.as_str())
+                                .header("X-Session-Id", &client_session_id)
+                                .header("X-Antigravity-Session-Id", &client_session_id)
+                                .body(Body::from(serde_json::to_string(&error_json).unwrap()))
+                                .unwrap()
                                 .into_response());
                         }
                     }
                 }
             }
 
-            ttft_ms = upstream_req_start.elapsed().as_micros() as f64 / 1000.0;
+            ttft_ms = effective_attempt_start.elapsed().as_micros() as f64 / 1000.0;
+            if let Some(effective_item) = fallback_attempts.iter_mut().find(|a| a.is_effective) {
+                effective_item.duration_s = ttft_ms / 1000.0;
+            }
+            let _ = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.try_with(|holder| {
+                holder.set_attempts(fallback_attempts.clone());
+            });
             let mut gemini_resp: Value = response
                 .json()
                 .await
@@ -884,12 +990,21 @@ pub async fn handle_generate(
                 .header("Content-Type", "application/json")
                 .header("X-Account-Email", &email)
                 .header("X-Mapped-Model", &mapped_model)
+                .header("X-Upstream-Model", config.final_model.as_str())
                 .header("X-Session-Id", &client_session_id)
                 .header("X-Antigravity-Session-Id", &client_session_id)
                 .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
                 .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
                 .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
                 .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                .header(
+                    "X-Timing-Ttft-Overhead-Ms",
+                    format!("{:.3}", fallback_overhead_ms),
+                )
+                .header(
+                    "X-Timing-Ttft-Attempts",
+                    attempts_b64.as_deref().unwrap_or(""),
+                )
                 .body(Body::from(serde_json::to_string(&unwrapped).unwrap()))
                 .unwrap()
                 .into_response());
@@ -952,11 +1067,11 @@ pub async fn handle_generate(
                     {
                         tracing::error!("Failed to set validation block: {}", e);
                     }
-                }
-
-                // 设置 is_forbidden 状态并持久化
-                if let Err(e) = token_manager.set_forbidden(&acc_id, &error_text).await {
-                    tracing::error!("Failed to set forbidden status: {}", e);
+                } else {
+                    // 设置 is_forbidden 状态并持久化（仅当真正非人机验证类 403 时才进入永久禁用）
+                    if let Err(e) = token_manager.set_forbidden(&acc_id, &error_text).await {
+                        tracing::error!("Failed to set forbidden status: {}", e);
+                    }
                 }
             }
         }
@@ -1009,8 +1124,21 @@ pub async fn handle_generate(
         }
 
         if classification.is_model_not_found() {
+            // [NEW] 针对特定账号记录单模型临时熔断（例如该 PRO 账号未开通 Claude 5.5），绝不连坐其他模型
+            token_manager.mark_model_unsupported(&account_id, &mapped_model, Some(900));
+
+            // 如果账号池中还有其他未尝试的候选账号，则顺畅换号重试，而不是直接放弃报错
+            if attempt < pool_size {
+                tracing::warn!(
+                    "[Gemini] 上游报错模型不可用 (HTTP {})，已标记账号 {} 对模型 [{}] 临时熔断，继续换号重试 ({}/{})...",
+                    status_code, email, mapped_model, attempt, pool_size
+                );
+                force_rotate = true;
+                continue;
+            }
+
             tracing::warn!(
-                "[Gemini] Target model [{}] not found on upstream (HTTP {}). Terminating retry loop without account lockout.",
+                "[Gemini] Target model [{}] not found on upstream (HTTP {}). Pool exhausted without account-level lockout.",
                 mapped_model, status_code
             );
             let dual_err = crate::proxy::handlers::common::build_dual_track_error(
@@ -1024,6 +1152,7 @@ pub async fn handle_generate(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Model", config.final_model.as_str()),
                 ],
                 Json(dual_err),
             )
@@ -1133,6 +1262,7 @@ pub async fn handle_generate(
             [
                 ("X-Account-Email", email.as_str()),
                 ("X-Mapped-Model", mapped_model.as_str()),
+                ("X-Upstream-Model", config.final_model.as_str()),
             ],
             Json(dual_err),
         )
@@ -1160,24 +1290,41 @@ pub async fn handle_generate(
 pub async fn handle_list_models(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    use crate::proxy::common::model_mapping::get_all_dynamic_models;
+    use crate::proxy::common::model_mapping::{
+        get_all_dynamic_models, get_all_dynamic_models_metadata,
+    };
 
     // 获取所有动态模型列表（与 /v1/models 一致）
     let only_raw = *state.only_raw_quota_models.read().await;
     let model_ids =
         get_all_dynamic_models(&state.custom_mapping, Some(&state.token_manager), only_raw).await;
+    let metadata_map = get_all_dynamic_models_metadata(
+        &state.custom_mapping,
+        Some(&state.token_manager),
+        only_raw,
+    )
+    .await;
 
     // 转换为 Gemini API 格式
     let models: Vec<_> = model_ids
         .into_iter()
         .map(|id| {
+            let meta = metadata_map
+                .get(&id)
+                .or_else(|| metadata_map.get(&id.to_lowercase()));
+            let display_name = meta
+                .and_then(|m| m.display_name.clone())
+                .unwrap_or_else(|| id.clone());
+            let input_limit = meta.and_then(|m| m.max_tokens).unwrap_or(128000);
+            let output_limit = meta.and_then(|m| m.max_output_tokens).unwrap_or(8192);
+
             json!({
                 "name": format!("models/{}", id),
                 "version": "001",
-                "displayName": id.clone(),
+                "displayName": display_name,
                 "description": "",
-                "inputTokenLimit": 128000,
-                "outputTokenLimit": 8192,
+                "inputTokenLimit": input_limit,
+                "outputTokenLimit": output_limit,
                 "supportedGenerationMethods": ["generateContent", "countTokens"],
                 "temperature": 1.0,
                 "topP": 0.95,
@@ -1193,7 +1340,9 @@ pub async fn handle_get_model(
     State(state): State<AppState>,
     Path(model_name): Path<String>,
 ) -> impl IntoResponse {
-    use crate::proxy::common::model_mapping::find_dynamic_model;
+    use crate::proxy::common::model_mapping::{
+        find_dynamic_model, get_all_dynamic_models_metadata,
+    };
 
     let only_raw = *state.only_raw_quota_models.read().await;
     if let Some(matched_id) = find_dynamic_model(
@@ -1204,15 +1353,31 @@ pub async fn handle_get_model(
     )
     .await
     {
+        let metadata_map = get_all_dynamic_models_metadata(
+            &state.custom_mapping,
+            Some(&state.token_manager),
+            only_raw,
+        )
+        .await;
+
+        let meta = metadata_map
+            .get(&matched_id)
+            .or_else(|| metadata_map.get(&matched_id.to_lowercase()));
+        let display_name = meta
+            .and_then(|m| m.display_name.clone())
+            .unwrap_or_else(|| matched_id.clone());
+        let input_limit = meta.and_then(|m| m.max_tokens).unwrap_or(128000);
+        let output_limit = meta.and_then(|m| m.max_output_tokens).unwrap_or(8192);
+
         (
             StatusCode::OK,
             Json(json!({
                 "name": format!("models/{}", matched_id),
                 "version": "001",
-                "displayName": matched_id,
+                "displayName": display_name,
                 "description": "",
-                "inputTokenLimit": 128000,
-                "outputTokenLimit": 8192,
+                "inputTokenLimit": input_limit,
+                "outputTokenLimit": output_limit,
                 "supportedGenerationMethods": ["generateContent", "countTokens"],
                 "temperature": 1.0,
                 "topP": 0.95,
@@ -1329,6 +1494,7 @@ pub async fn execute_count_tokens(
                 [
                     ("X-Account-Email", "offline-estimate"),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Model", config.final_model.as_str()),
                 ],
                 Json(json!({ "totalTokens": local_tokens })),
             )
@@ -1373,6 +1539,7 @@ pub async fn execute_count_tokens(
                 [
                     ("X-Account-Email", email.as_str()),
                     ("X-Mapped-Model", mapped_model.as_str()),
+                    ("X-Upstream-Model", config.final_model.as_str()),
                 ],
                 Json(json!({ "totalTokens": local_tokens })),
             )
@@ -1396,6 +1563,7 @@ pub async fn execute_count_tokens(
             [
                 ("X-Account-Email", email.as_str()),
                 ("X-Mapped-Model", mapped_model.as_str()),
+                ("X-Upstream-Model", config.final_model.as_str()),
             ],
             Json(json!({ "totalTokens": local_tokens })),
         )
@@ -1427,6 +1595,7 @@ pub async fn execute_count_tokens(
         [
             ("X-Account-Email", email.as_str()),
             ("X-Mapped-Model", mapped_model.as_str()),
+            ("X-Upstream-Model", config.final_model.as_str()),
         ],
         Json(json!({ "totalTokens": total_tokens })),
     )

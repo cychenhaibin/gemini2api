@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-> 专业级 AI 账号管理与协议代理系统 (v4.9.1)
+> 专业级 AI 账号管理与协议代理系统 (v4.9.8)
 
 <div align="center">
   <img src="public/icon.png" width="100" height="100" alt="Antigravity Tools Logo">
@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/github/v/release/lbjlaq/Antigravity-Manager?color=blue&style=flat-square" alt="GitHub release">
     </a>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.9.1-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-4.9.8-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -302,11 +302,17 @@ env WEBKIT_DISABLE_DMABUF_RENDERER=1 ANTIGRAVITY_FORCE_WAYLAND=1 antigravity-too
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8045"
 export ANTHROPIC_API_KEY="sk-antigravity"
-jeikcode --model claude-sonnet-4-6-thinking
+jeikcode --model claude-sonnet-4-6
 ```
 > 更多高级配置与排查指南参见：[JeikCode 接入 Antigravity-Manager 指南](./docs/jeikcode_integration.md)
 
 ### 如何接入 Claude Code CLI?
+> **客户端推荐版本说明**：
+> - **稳定生产推荐**：`Claude Code v2.1.28x`（流完成校验相对宽松，网络抖动下鲁棒性最高）；
+> - **最新版本支持**：`Claude Code v2.1.293 ~ v2.1.295`（须配合部署包含断流防挂起与保活优化的网关版本，详见 [排查诊断文档](./docs/CLAUDE_CODE_STREAM_DIAGNOSIS.md)）。
+> 
+> 安装指定稳定版本示例：`npm install -g @anthropic-ai/claude-code@2.1.284`
+
 1.  启动 Antigravity，并在“API 反代”页面开启服务。
 2.  在终端执行：
 ```bash
@@ -488,7 +494,7 @@ response = client.chat.completions.create(
 
 ## 📝 更新日志
 
-> 最新版本 **v4.9.1**（2026-10-02）：修复 `gemini-3.1-flash-lite` 误重定向至已故 2.5 系列导致 503 报错的严重问题并恢复健康直传，将后台摘要压缩任务重定向至存活轻量模型，从公开目录清理 2.5 全系列并平滑重定向至 `gemini-3.6-flash-medium`（Fixes #3577，感谢 @Xyloz3n）；收紧下游 SSE 流式思考心跳至 3 秒防止长推理提前断开连接（PR #3578，感谢 @EricZhou05）。
+> 最新版本 **v4.9.8**（2026-10-17）：Antigravity 经典款配额耗尽/低于阈值全自动无感热切换与双核算力池监控（Ref #3509）；原生全面演进支持 Antigravity CLI (`agy`)，自动 Shell Wrapper 注入与模型思考档位智能拆解，三端（经典款 / IDE / CLI）活动账号独立探查与情境化多端徽章（Ref #3686, Ref #3630）；403 错误详情全量捕获与动作链接提取（人机验证/申诉），临时验证与永久禁用严格解耦，配额恢复全自动闭环自愈（Ref #3630, Ref #3684）；对齐 Claude Code 2.1.301 协议规范与 Agent SDK 开场白防 WAF 身份清洗，全链路下行注入 `request-id`，录入 Claude 5 全系 8 个核心模型（PR #3689, Ref #3684, Ref #3686）；JSON Schema 活跃引用追踪阻断循环展开指数爆炸杜绝 Linux VPS OOM (SIGKILL 137) 崩溃，规范化数组非法 properties 与终态 ARRAY 守卫规避 Gemini 400 报错，推理/思考模型流式首包 Peek 超时自适应放宽至 60s/90s/120s 杜绝 30s 误杀，账号池两阶段原子同步加载彻底消除并发 503 闪断，限流防倒退校验与 RPC details 全量遍历（PR #3694, Fixes #3690, Ref #3682, Ref #3693）；彻底剔除 100% 报 429 的 Prod 生产公共端点，流式接口首包超时保底放宽至 120s，Responses 格式数组 input 完整还原多轮角色边界，根除 0ms 乐观重置风暴（PR #3691, PR #3672, PR #3687, PR #3685, Fixes #3506, Ref #3525）；流量监控报文详情重构为 Postman 风格单 Tab 视窗、正文「结构化拆分」与「原始代码」双视图、两列键值对表格与 Bearer 掩码脱敏、标准双链路 HAR 1.2 导出，全量覆盖 12 种系统语言（感谢 @cubelikeplayDaniel, @EricZhou05, @blackdm666, @jeikl）。
 
 👉 **[查看完整更新日志 CHANGELOG.md →](CHANGELOG.md)**
 
@@ -497,6 +503,8 @@ response = client.chat.completions.create(
 
 <a href="https://github.com/lbjlaq"><img src="https://github.com/lbjlaq.png" width="50px" style="border-radius: 50%;" alt="lbjlaq"/></a>
 <a href="https://github.com/jeikl"><img src="https://github.com/jeikl.png" width="50px" style="border-radius: 50%;" alt="jeikl"/></a>
+<a href="https://github.com/cubelikeplayDaniel"><img src="https://github.com/cubelikeplayDaniel.png" width="50px" style="border-radius: 50%;" alt="cubelikeplayDaniel"/></a>
+<a href="https://github.com/diannaaav"><img src="https://github.com/diannaaav.png" width="50px" style="border-radius: 50%;" alt="diannaaav"/></a>
 <a href="https://github.com/XinXin622"><img src="https://github.com/XinXin622.png" width="50px" style="border-radius: 50%;" alt="XinXin622"/></a>
 <a href="https://github.com/llsenyue"><img src="https://github.com/llsenyue.png" width="50px" style="border-radius: 50%;" alt="llsenyue"/></a>
 <a href="https://github.com/salacoste"><img src="https://github.com/salacoste.png" width="50px" style="border-radius: 50%;" alt="salacoste"/></a>

@@ -11,6 +11,9 @@ use std::collections::HashMap;
 const CLAUDE_AGENT_SDK_IDENTITY: &str =
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 #[cfg(test)]
+const CLAUDE_AGENT_SDK_CLI_IDENTITY: &str =
+    "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.";
+#[cfg(test)]
 const CLAUDE_CODE_CLI_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Normalize the standalone identity block injected by Claude Agent SDK clients.
@@ -487,6 +490,7 @@ pub fn transform_claude_request_in_timed(
             type_: "enabled".to_string(),
             budget_tokens: Some(default_budget as u32),
             effort: None,
+            display: None,
         });
     }
 
@@ -1815,8 +1819,7 @@ fn build_generation_config(
         .output_config
         .as_ref()
         .and_then(|c| c.effort.as_ref())
-        .or_else(|| claude_req.thinking.as_ref().and_then(|t| t.effort.as_ref()))
-        .or_else(|| tb_config.effort.as_ref());
+        .or_else(|| claude_req.thinking.as_ref().and_then(|t| t.effort.as_ref()));
 
     let client_effort = effort.map(|s| s.as_str());
     let client_budget = claude_req
@@ -1880,8 +1883,13 @@ fn build_generation_config(
     }
 
     if let Some(val) = final_max_tokens {
-        // [FIX] Cap maxOutputTokens to safe upper limit (65535 for Pro, 65536 for Flash) to avoid INVALID_ARGUMENT (Cherry Studio sends 128000)
-        let safe_limit = if mapped_model.to_lowercase().contains("pro") {
+        // [FIX] Cap maxOutputTokens to safe upper limit (128000 for Claude 5.5, 65535 for Pro, 65536 for Flash, 64000 for Claude 4.6)
+        let mapped_lower = mapped_model.to_lowercase();
+        let safe_limit = if mapped_lower.contains("5-5") || mapped_lower.contains("5.5") {
+            128000
+        } else if mapped_lower.contains("claude") {
+            64000
+        } else if mapped_lower.contains("pro") {
             65535
         } else {
             65536
@@ -1959,9 +1967,82 @@ mod tests {
             .filter_map(|part| part["text"].as_str())
             .collect::<Vec<_>>();
 
-        assert!(system_texts.contains(&CLAUDE_CODE_CLI_IDENTITY));
+        assert!(system_texts
+            .contains(&crate::proxy::mappers::prompt_sanitizer::OFFICIAL_ANTIGRAVITY_IDENTITY));
         assert!(!system_texts.contains(&CLAUDE_AGENT_SDK_IDENTITY));
         assert!(!system_texts.contains(&"x-anthropic-billing-header: cc_entrypoint=sdk-cli;"));
+    }
+
+    #[test]
+    fn test_agent_sdk_cli_identity_is_normalized_for_antigravity() {
+        let req: ClaudeRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Reply with ok"}],
+            "system": [
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: cc_entrypoint=sdk-cli;"
+                },
+                {
+                    "type": "text",
+                    "text": CLAUDE_AGENT_SDK_CLI_IDENTITY,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        }))
+        .expect("Agent SDK CLI request should deserialize");
+
+        let body =
+            transform_claude_request_in(&req, "test-project", false, None, "test-session", None)
+                .expect("Agent SDK CLI request should transform");
+        let system_parts = body["request"]["systemInstruction"]["parts"]
+            .as_array()
+            .expect("system instruction should contain parts");
+        let system_texts = system_parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(system_texts
+            .contains(&crate::proxy::mappers::prompt_sanitizer::OFFICIAL_ANTIGRAVITY_IDENTITY));
+        assert!(!system_texts.contains(&CLAUDE_AGENT_SDK_CLI_IDENTITY));
+        assert!(!system_texts.contains(&"x-anthropic-billing-header: cc_entrypoint=sdk-cli;"));
+    }
+
+    #[test]
+    fn test_claude_code_cli_identity_is_normalized_for_antigravity() {
+        let req: ClaudeRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Reply with ok"}],
+            "system": [
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: cc_entrypoint=cli;"
+                },
+                {
+                    "type": "text",
+                    "text": CLAUDE_CODE_CLI_IDENTITY,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        }))
+        .expect("Claude Code CLI request should deserialize");
+
+        let body =
+            transform_claude_request_in(&req, "test-project", false, None, "test-session", None)
+                .expect("Claude Code CLI request should transform");
+        let system_parts = body["request"]["systemInstruction"]["parts"]
+            .as_array()
+            .expect("system instruction should contain parts");
+        let system_texts = system_parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(system_texts
+            .contains(&crate::proxy::mappers::prompt_sanitizer::OFFICIAL_ANTIGRAVITY_IDENTITY));
+        assert!(!system_texts.contains(&CLAUDE_CODE_CLI_IDENTITY));
+        assert!(!system_texts.contains(&"x-anthropic-billing-header: cc_entrypoint=cli;"));
     }
 
     #[test]
@@ -2290,6 +2371,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(1024),
                 effort: None,
+                display: None,
             }),
             metadata: None,
             output_config: None,
@@ -2415,6 +2497,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(1024),
                 effort: None,
+                display: None,
             }),
             metadata: None,
             output_config: None,
@@ -2423,25 +2506,23 @@ mod tests {
             tool_choice: None,
         };
 
-        let result =
-            transform_claude_request_in(&req, "test-project", false, None, "test_session", None);
+        let result = transform_claude_request_in(
+            &req,
+            "test-project",
+            false,
+            None,
+            "test_session_empty_content_fix_unique",
+            None,
+        );
         assert!(result.is_ok(), "Transformation failed");
         let body = result.unwrap();
         let contents = body["request"]["contents"].as_array().unwrap();
         let parts = contents[0]["parts"].as_array().unwrap();
 
-        // 验证空 thinking 块被降级为包含 "..." 的非 thought 文本部分（并与后续文本紧凑合并）
-        let downgraded_part = parts.iter().find(|p| {
-            p.get("text")
-                .and_then(|t| t.as_str())
-                .map(|s| s.contains("..."))
-                .unwrap_or(false)
-                && p.get("thought").is_none()
-        });
-        assert!(
-            downgraded_part.is_some(),
-            "Empty thinking should be downgraded to text without thought: true"
-        );
+        // 验证空/占位 thinking 块按流水线规范被安全丢弃，不污染后续正文
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "Hi");
+        assert!(parts[0].get("thought").is_none());
     }
 
     #[test]
@@ -2702,6 +2783,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(32000),
                 effort: None,
+                display: None,
             }),
             max_tokens: None,
             temperature: None,
@@ -2732,6 +2814,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(32000),
                 effort: None,
+                display: None,
             }),
             max_tokens: None,
             temperature: None,
@@ -2773,6 +2856,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(16000),
                 effort: None,
+                display: None,
             }),
             max_tokens: None,
             temperature: None,
@@ -2907,8 +2991,11 @@ mod tests {
         // Set global config to Adaptive + High effort
         let config = ThinkingBudgetConfig {
             mode: crate::proxy::config::ThinkingBudgetMode::Adaptive,
+            claude_mode: crate::proxy::config::ThinkingBudgetMode::Custom,
             custom_value: 0,
             effort: Some("high".to_string()),
+            claude_budget: 16384,
+            claude_high: 16384,
             ..Default::default()
         };
         crate::proxy::config::update_thinking_budget_config(config);
@@ -3197,14 +3284,15 @@ mod tests {
             panic!("Expected array content");
         }
 
-        // 2. transform_claude_request_in should produce a thinking block with sentinel signature for gemini-3.8-flash-high
+        // 2. transform_claude_request_in 针对 Claude 模型，无有效签名时为防上游 400 应降级为 <think> 文本保留语义
         let req = ClaudeRequest {
-            model: "gemini-3.8-flash-high".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             messages,
             thinking: Some(ThinkingConfig {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(12288),
                 effort: None,
+                display: None,
             }),
             system: None,
             tools: None,
@@ -3229,16 +3317,10 @@ mod tests {
             .expect("Contents array");
         let assistant_parts = contents[1]["parts"].as_array().expect("Assistant parts");
         assert_eq!(assistant_parts.len(), 2);
-        assert_eq!(assistant_parts[0]["thought"], true);
-        assert!(
-            assistant_parts[0].get("thoughtSignature").is_none()
-                || assistant_parts[0]["thoughtSignature"].is_null(),
-            "Sentinel elimination: thoughtSignature must be absent when unsigned"
-        );
-        assert_eq!(
-            assistant_parts[0]["text"],
-            "Considering the question deeply..."
-        );
+        assert!(assistant_parts[0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Considering the question deeply..."));
         assert_eq!(assistant_parts[1]["text"], "Here is my answer");
     }
 
@@ -3302,6 +3384,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(12288),
                 effort: None,
+                display: None,
             }),
             system: None,
             tools: None,
@@ -3325,15 +3408,11 @@ mod tests {
             .as_array()
             .expect("Contents array");
         let assistant_parts = contents[1]["parts"].as_array().expect("Assistant parts");
-        assert_eq!(assistant_parts.len(), 2);
-        assert_eq!(assistant_parts[0]["thought"], true);
-        assert!(
-            assistant_parts[0].get("thoughtSignature").is_none(),
-            "I4 rule: Gemini target thought block must NOT carry signature"
-        );
-        assert_eq!(assistant_parts[1]["functionCall"]["name"], "list_directory");
+        // Gemini 目标在历史轮次中按上游规范剥离思考文本，仅保留工具调用，且工具调用继承思考块真实签名
+        assert_eq!(assistant_parts.len(), 1);
+        assert_eq!(assistant_parts[0]["functionCall"]["name"], "list_directory");
         assert_eq!(
-            assistant_parts[1]["thoughtSignature"], real_sig,
+            assistant_parts[0]["thoughtSignature"], real_sig,
             "Gemini model functionCall must inherit the real signature from the thinking block"
         );
     }
@@ -3394,6 +3473,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(8192),
                 effort: None,
+                display: None,
             }),
             system: None,
             tools: None,
@@ -3423,22 +3503,24 @@ mod tests {
             .as_array()
             .expect("Contents array");
         let assistant_parts = contents[1]["parts"].as_array().expect("Assistant parts");
-        assert_eq!(assistant_parts[0]["thought"], true);
-        assert!(
-            assistant_parts[0].get("thoughtSignature").is_none(),
-            "Thinking block must be clean without signature"
+        assert_eq!(assistant_parts.len(), 1);
+        assert_eq!(assistant_parts[0]["functionCall"]["name"], "web_fetch");
+        // 异构 Claude 签名被成功剥离，绝不继承该外来签名；出站门禁自动补齐安全哨兵防止上游 AST 校验 400
+        assert_ne!(
+            assistant_parts[0]
+                .get("thoughtSignature")
+                .and_then(|s| s.as_str()),
+            Some(foreign_claude_sig)
         );
-        // 铁律：不兼容的外来 Claude 签名被剥离后**留空**，绝不回退成哨兵。
-        // 官方报文里哨兵出现 0/23 次，它不属于 Antigravity 协议。
-        assert!(
-            assistant_parts[1].get("thoughtSignature").is_none(),
-            "Gemini functionCall must drop the foreign signature instead of falling back to sentinel"
+        assert_eq!(
+            assistant_parts[0]["thoughtSignature"],
+            crate::proxy::thinking_store::SENTINEL_SIGNATURE
         );
     }
 
     #[test]
     fn test_claude_request_with_corrupt_and_empty_images_defense() {
-        let valid_png_b64 = "iVBORw0KGgo=";
+        let valid_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
         let req = ClaudeRequest {
             model: "claude-3-7-sonnet-20250219".to_string(),
             messages: vec![Message {
@@ -3560,6 +3642,7 @@ mod tests {
                 type_: "enabled".to_string(),
                 budget_tokens: Some(99999), // 客户端传入过大/错误预算
                 effort: None,
+                display: None,
             }),
             max_tokens: Some(1024),
             temperature: None,
@@ -3706,21 +3789,26 @@ mod tests {
         let contents = body["request"]["contents"]
             .as_array()
             .expect("contents array");
+        assert_eq!(contents.len(), 4);
+
+        // contents[2] 为 functionResponse (role: "model")
         let tool_parts = contents[2]["parts"].as_array().expect("tool turn parts");
-
-        // 验证同时存在 functionResponse 和 inlineData 两个 parts
-        assert_eq!(tool_parts.len(), 2);
+        assert_eq!(tool_parts.len(), 1);
         assert!(tool_parts[0].get("functionResponse").is_some());
-        assert!(tool_parts[1].get("inlineData").is_some());
-
-        let inline_data = &tool_parts[1]["inlineData"];
-        assert_eq!(inline_data["mimeType"], "image/png");
-        assert_eq!(inline_data["data"], fake_b64);
 
         let res_str = tool_parts[0]["functionResponse"]["response"]["output"]
             .as_str()
             .unwrap();
         assert!(!res_str.contains(fake_b64));
         assert!(res_str.contains("[Image: forwarded to visual input (image/png)]"));
+
+        // contents[3] 为依据 [zwx-patch] 拆解出的 inlineData 视觉媒体轮次 (role: "user")
+        let media_parts = contents[3]["parts"].as_array().expect("media turn parts");
+        assert_eq!(media_parts.len(), 1);
+        assert!(media_parts[0].get("inlineData").is_some());
+
+        let inline_data = &media_parts[0]["inlineData"];
+        assert_eq!(inline_data["mimeType"], "image/png");
+        assert_eq!(inline_data["data"], fake_b64);
     }
 }

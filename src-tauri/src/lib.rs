@@ -75,9 +75,17 @@ fn should_enable_tray() -> bool {
     true
 }
 
-/// Login-item launches pass `--minimized`. Quiet startup applies only to that launch.
+/// Login-item launches or shortcut flags pass `--minimized`, `--silent`, `--hidden`, or `-s`.
+/// Quiet startup applies only to that launch.
 fn apply_login_launch_policy(app: &tauri::App) {
-    let launched_by_login = std::env::args().any(|arg| arg == "--minimized");
+    let launched_by_login = std::env::args().any(|arg| {
+        let lower = arg.to_lowercase();
+        lower == "--minimized"
+            || lower == "--silent"
+            || lower == "--hidden"
+            || lower == "-s"
+            || lower == "/minimized"
+    });
     if !launched_by_login {
         return;
     }
@@ -127,12 +135,14 @@ fn credential_state(value: &str) -> &'static str {
 fn nvidia_proprietary_loaded() -> bool {
     std::path::Path::new("/dev/nvidia0").exists()
         || std::path::Path::new("/proc/driver/nvidia/version").exists()
+        || std::path::Path::new("/sys/module/nvidia").exists()
 }
 
 #[cfg(target_os = "linux")]
 fn configure_linux_graphics() {
     use linux_graphics::{
-        desktop_is_wlroots_family, should_disable_webkit_dmabuf, should_force_x11_backend,
+        desktop_is_gnome, desktop_is_kde, desktop_is_wlroots_family, should_disable_webkit_dmabuf,
+        should_force_x11_backend,
     };
 
     let is_wayland = is_wayland_session();
@@ -153,14 +163,19 @@ fn configure_linux_graphics() {
         has_x11_display,
         &desktop,
     ) {
-        // Force X11 backend under GNOME/KDE Wayland to avoid a GTK shm crash.
+        // Force X11 backend under GNOME/legacy Wayland to avoid a GTK shm crash.
         std::env::set_var("GDK_BACKEND", "x11");
         warn!(
             "Forcing GDK_BACKEND=x11 for stability on Wayland. Set ANTIGRAVITY_FORCE_WAYLAND=1 to keep Wayland backend."
         );
-    } else if is_wayland && !gdk_already_set && desktop_is_wlroots_family(&desktop) {
+    } else if is_wayland
+        && !gdk_already_set
+        && (desktop_is_wlroots_family(&desktop)
+            || desktop_is_kde(&desktop)
+            || desktop_is_gnome(&desktop))
+    {
         info!(
-            "Keeping native Wayland GDK backend on {} (Xwayland DISPLAY is not a reason to force X11).",
+            "Keeping native Wayland GDK backend on {} (avoiding Xwayland WebKitGTK frame freeze).",
             desktop
         );
     }
@@ -425,6 +440,12 @@ pub fn run() {
                         }
                     }
 
+                    // Initialize Hub fingerprint from config or detection
+                    crate::modules::hub_version::update_hub_fingerprint(
+                        config.proxy.hub_version.as_deref(),
+                        config.proxy.hub_cl.as_deref(),
+                    );
+
                     // Start proxy service
                     if let Err(e) = commands::proxy::internal_start_proxy_service(
                         config.proxy,
@@ -512,29 +533,6 @@ pub fn run() {
                 });
             }
 
-            // Linux: Workaround for transparent window crash/freeze
-            // The transparent window feature is unstable on Linux with WebKitGTK
-            // We disable the visual alpha channel to prevent softbuffer-related crashes
-            #[cfg(target_os = "linux")]
-            {
-                use tauri::Manager;
-                if is_wayland_session() {
-                    info!("Linux Wayland session detected; skipping transparent window workaround");
-                } else if let Some(window) = app.get_webview_window("main") {
-                    // Access GTK window and disable transparency at the GTK level
-                    if let Ok(gtk_window) = window.gtk_window() {
-                        use gtk::prelude::WidgetExt;
-                        // Remove the visual's alpha channel to disable transparency
-                        if let Some(screen) = gtk_window.screen() {
-                            // Use non-composited visual if available
-                            if let Some(visual) = screen.system_visual() {
-                                gtk_window.set_visual(Some(&visual));
-                            }
-                            info!("Linux: Applied transparent window workaround");
-                        }
-                    }
-                }
-            }
 
             let runtime_flags = app.state::<AppRuntimeFlags>();
             if runtime_flags.tray_enabled {
@@ -549,6 +547,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 // Load config
                 if let Ok(config) = modules::config::load_app_config() {
+                    crate::modules::hub_version::update_hub_fingerprint(
+                        config.proxy.hub_version.as_deref(),
+                        config.proxy.hub_cl.as_deref(),
+                    );
                     let state = handle.state::<commands::proxy::ProxyServiceState>();
                     let cf_state = handle.state::<commands::cloudflared::CloudflaredState>();
                     let integration =
@@ -660,6 +662,7 @@ pub fn run() {
             commands::delete_device_version,
             commands::open_device_folder,
             commands::get_current_account,
+            commands::get_active_clients_status,
             // Quota commands
             commands::fetch_account_quota,
             commands::refresh_all_quotas,
@@ -725,6 +728,7 @@ pub fn run() {
             commands::proxy::clear_thinking_store,
             commands::proxy::get_thinking_store_count,
             commands::proxy::get_proxy_db_disk_size,
+            commands::proxy::test_model_connectivity,
             commands::proxy::generate_api_key,
             commands::proxy::reload_proxy_accounts,
             commands::proxy::update_model_mapping,
@@ -735,6 +739,8 @@ pub fn run() {
             commands::proxy::clear_proxy_session_bindings,
             commands::proxy::set_preferred_account,
             commands::proxy::get_preferred_account,
+            commands::proxy::get_hub_fingerprint,
+            commands::proxy::detect_remote_hub_fingerprint,
             commands::proxy::clear_proxy_rate_limit,
             commands::proxy::clear_all_proxy_rate_limits,
             // Proxy Pool Binding commands
@@ -754,14 +760,17 @@ pub fn run() {
             commands::get_http_api_settings,
             commands::save_http_api_settings,
             // Token 统计命令
+            commands::get_token_stats_minute,
             commands::get_token_stats_hourly,
             commands::get_token_stats_daily,
             commands::get_token_stats_weekly,
             commands::get_token_stats_by_account,
             commands::get_token_stats_summary,
             commands::get_token_stats_by_model,
+            commands::get_token_stats_model_trend_minute,
             commands::get_token_stats_model_trend_hourly,
             commands::get_token_stats_model_trend_daily,
+            commands::get_token_stats_account_trend_minute,
             commands::get_token_stats_account_trend_hourly,
             commands::get_token_stats_account_trend_daily,
             proxy::cli_sync::get_cli_sync_status,
@@ -828,9 +837,18 @@ pub fn run() {
             commands::user_token::renew_user_token,
             commands::user_token::get_token_ip_bindings,
             commands::user_token::get_user_token_summary,
+            commands::user_token::get_user_token_stats,
+            commands::user_token::get_user_tokens_ranking,
             commands::query_transit_info,
             // Patch commands
             commands::patch_agy_binary,
+            commands::list_claude_installations,
+            commands::check_claude_cowork_patch,
+            commands::apply_claude_cowork_patch,
+            commands::revert_claude_cowork_patch,
+            commands::is_claude_desktop_running,
+            commands::close_claude_desktop,
+            commands::launch_claude_desktop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

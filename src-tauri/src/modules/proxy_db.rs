@@ -392,6 +392,10 @@ pub fn init_db() -> Result<(), String> {
         "ALTER TABLE request_logs ADD COLUMN cached_tokens INTEGER",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN account_email TEXT", []);
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN mapped_model TEXT", []);
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN protocol TEXT", []);
@@ -410,6 +414,10 @@ pub fn init_db() -> Result<(), String> {
         [],
     );
     let _ = conn.execute("ALTER TABLE request_logs ADD COLUMN session_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE request_logs ADD COLUMN upstream_model TEXT",
+        [],
+    );
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON request_logs (timestamp DESC)",
@@ -509,16 +517,66 @@ fn map_request_log_row(row: &rusqlite::Row) -> rusqlite::Result<ProxyRequestLog>
         input_tokens: row.get(11).unwrap_or(None),
         output_tokens: row.get(12).unwrap_or(None),
         cached_tokens: row.get(13).unwrap_or(None),
-        account_email: row.get(14).unwrap_or(None),
-        mapped_model: row.get(15).unwrap_or(None),
-        protocol: row.get(16).unwrap_or(None),
-        client_ip: row.get(17).unwrap_or(None),
-        username: row.get(18).unwrap_or(None),
-        request_headers: row.get(19).unwrap_or(None),
-        upstream_request_headers: row.get(20).unwrap_or(None),
-        response_headers: row.get(21).unwrap_or(None),
-        session_id: row.get(22).unwrap_or(None),
+        reasoning_tokens: row.get(14).unwrap_or(None),
+        account_email: row.get(15).unwrap_or(None),
+        mapped_model: row.get(16).unwrap_or(None),
+        protocol: row.get(17).unwrap_or(None),
+        client_ip: row.get(18).unwrap_or(None),
+        username: row.get(19).unwrap_or(None),
+        request_headers: row.get(20).unwrap_or(None),
+        upstream_request_headers: row.get(21).unwrap_or(None),
+        response_headers: row.get(22).unwrap_or(None),
+        session_id: row.get(23).unwrap_or(None),
+        upstream_model: row
+            .get::<_, Option<String>>("upstream_model")
+            .ok()
+            .flatten(),
     })
+}
+
+pub const MAX_TOOL_SIGNATURES_ROWS: usize = 10_000;
+pub const TOOL_SIGNATURES_TTL_DAYS: i64 = 7;
+
+/// 淘汰与修剪 tool_signatures 表（Defect 12: 限制 10,000 行上限与 7 天 TTL 淘汰）
+pub fn prune_tool_signatures(
+    conn: &Connection,
+    max_rows: usize,
+    ttl_days: i64,
+) -> Result<usize, String> {
+    let mut total_deleted = 0;
+
+    // 1. TTL 淘汰：删除超过 ttl_days (默认 7 天) 的陈旧工具签名
+    if ttl_days > 0 {
+        let cutoff = chrono::Utc::now().timestamp_millis() - (ttl_days * 24 * 3600 * 1000);
+        let deleted = conn
+            .execute(
+                "DELETE FROM tool_signatures WHERE created_at < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+        total_deleted += deleted;
+    }
+
+    // 2. 数量上限淘汰：若总行数超出 max_rows (默认 10,000)，淘汰 created_at 最早的超额行
+    if max_rows > 0 {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if count > max_rows as i64 {
+            let excess = count - max_rows as i64;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM tool_signatures WHERE tool_id IN (
+                        SELECT tool_id FROM tool_signatures ORDER BY created_at ASC LIMIT ?1
+                    )",
+                    params![excess],
+                )
+                .map_err(|e| e.to_string())?;
+            total_deleted += deleted;
+        }
+    }
+
+    Ok(total_deleted)
 }
 
 pub fn save_tool_signature(tool_id: &str, signature: &str) -> Result<(), String> {
@@ -537,6 +595,8 @@ pub fn save_tool_signature(tool_id: &str, signature: &str) -> Result<(), String>
         params![norm_id.as_ref(), healed_sig, now],
     )
     .map_err(|e| e.to_string())?;
+
+    let _ = prune_tool_signatures(&conn, MAX_TOOL_SIGNATURES_ROWS, TOOL_SIGNATURES_TTL_DAYS);
     Ok(())
 }
 
@@ -1209,15 +1269,35 @@ pub fn delete_thinking_records_except_fingerprints(
     .map_err(|e| e.to_string())
 }
 
+pub fn delete_tool_signatures_for_session(session_key: &str) -> Result<usize, String> {
+    let clean_key = session_key.trim();
+    if clean_key.is_empty() {
+        return Ok(0);
+    }
+    let conn = connect_db()?;
+    let p1 = format!("{clean_key}\u{1f}%");
+    let p2 = format!("%:{clean_key}\u{1f}%");
+    conn.execute(
+        "DELETE FROM tool_signatures WHERE tool_id LIKE ?1 OR tool_id LIKE ?2",
+        params![p1, p2],
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub fn delete_thinking_records_for_session(session_key: &str) -> Result<usize, String> {
+    let clean = session_key.trim();
+    if clean.is_empty() {
+        return Ok(0);
+    }
     let conn = thinking_db()?;
+    let suffix = format!("%:{}", clean);
     let _ = conn.execute(
-        "DELETE FROM thinking_sessions WHERE session_key = ?1",
-        params![session_key],
+        "DELETE FROM thinking_sessions WHERE session_key = ?1 OR session_key LIKE ?2",
+        params![clean, suffix],
     );
     conn.execute(
-        "DELETE FROM thinking_records WHERE session_key = ?1",
-        params![session_key],
+        "DELETE FROM thinking_records WHERE session_key = ?1 OR session_key LIKE ?2",
+        params![clean, suffix],
     )
     .map_err(|e| e.to_string())
 }
@@ -1317,13 +1397,7 @@ pub fn cleanup_old_thinking_records(days: i64) -> Result<usize, String> {
     let cutoff = chrono::Utc::now().timestamp_millis() - (days * 24 * 3600 * 1000);
     let deleted_tools = connect_db()
         .ok()
-        .and_then(|conn| {
-            conn.execute(
-                "DELETE FROM tool_signatures WHERE created_at < ?1",
-                params![cutoff],
-            )
-            .ok()
-        })
+        .and_then(|conn| prune_tool_signatures(&conn, MAX_TOOL_SIGNATURES_ROWS, days).ok())
         .unwrap_or(0);
     let conn = thinking_db()?;
     let deleted_records = conn
@@ -1566,7 +1640,27 @@ fn make_room(conn: &Connection, budget: u64, log_bytes: u64) -> Result<(), Strin
     if projected_bytes(conn, log_bytes)? <= budget {
         Ok(())
     } else {
-        Err("proxy log disk budget exhausted".to_string())
+        // [FIX] 防范非日志表 (如 tool_signatures) 导致的磁盘配额死锁：
+        // 若已执行多轮清理但物理文件依然超预算，且 request_logs 表已删空或仅存微量记录，
+        // 绝不可直接抛错导致全代理请求日志无法持久化并彻底致盲监控。
+        let remaining_logs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+            .unwrap_or(0);
+        if remaining_logs <= 1 {
+            // [Defect 12] 尝试主动修剪 tool_signatures 表以释放空间
+            let _ = prune_tool_signatures(conn, MAX_TOOL_SIGNATURES_ROWS / 2, 3);
+            let _ = reclaim_space(conn);
+            if projected_bytes(conn, log_bytes)? <= budget {
+                return Ok(());
+            }
+            tracing::warn!(
+                "[ProxyLog] Disk budget reached ({:.2} MB) but database size is occupied by non-log tables. Preserving service logging availability.",
+                budget as f64 / 1_048_576.0
+            );
+            Ok(())
+        } else {
+            Err("proxy log disk budget exhausted".to_string())
+        }
     }
 }
 
@@ -1599,6 +1693,7 @@ fn save_log_with_connection(
         + [
             &log.model,
             &log.mapped_model,
+            &log.upstream_model,
             &log.account_email,
             &log.client_ip,
             &log.error,
@@ -1638,8 +1733,8 @@ fn save_log_with_connection(
     make_room(conn, budget, log_bytes)?;
 
     conn.execute(
-        "INSERT INTO request_logs (id, timestamp, method, url, status, duration, model, error, request_body, upstream_request_body, response_body, input_tokens, output_tokens, cached_tokens, account_email, mapped_model, protocol, client_ip, username, request_headers, upstream_request_headers, response_headers, session_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+        "INSERT INTO request_logs (id, timestamp, method, url, status, duration, model, error, request_body, upstream_request_body, response_body, input_tokens, output_tokens, cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username, request_headers, upstream_request_headers, response_headers, session_id, upstream_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             log.id,
             log.timestamp,
@@ -1655,6 +1750,7 @@ fn save_log_with_connection(
             log.input_tokens,
             log.output_tokens,
             log.cached_tokens,
+            log.reasoning_tokens,
             log.account_email,
             log.mapped_model,
             log.protocol,
@@ -1664,6 +1760,7 @@ fn save_log_with_connection(
             log.upstream_request_headers,
             log.response_headers,
             log.session_id,
+            log.upstream_model,
         ],
     ).map_err(|e| e.to_string())?;
 
@@ -1678,9 +1775,9 @@ pub fn get_logs_summary(limit: usize, offset: usize) -> Result<Vec<ProxyRequestL
         .prepare(
             "SELECT id, timestamp, method, url, status, duration, model, substr(error, 1, 1024),
                 NULL as request_body, NULL as upstream_request_body, NULL as response_body,
-                input_tokens, output_tokens, cached_tokens, account_email, mapped_model, protocol, client_ip, username,
-                NULL as request_headers, NULL as upstream_request_headers, NULL as response_headers,
-                session_id
+                input_tokens, output_tokens, cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
+                NULL as request_headers, NULL as upstream_request_headers, response_headers,
+                session_id, upstream_model
          FROM request_logs 
          ORDER BY timestamp DESC 
          LIMIT ?1 OFFSET ?2",
@@ -1735,9 +1832,9 @@ pub fn get_log_detail(log_id: &str) -> Result<ProxyRequestLog, String> {
         .prepare(
             "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, upstream_request_body, response_body, input_tokens, output_tokens,
-                cached_tokens, account_email, mapped_model, protocol, client_ip, username,
+                cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
                 request_headers, upstream_request_headers, response_headers,
-                session_id
+                session_id, upstream_model
          FROM request_logs
          WHERE id = ?1",
         )
@@ -1860,6 +1957,133 @@ mod tool_signature_tests {
         }
         assert_eq!(load_tool_signature("tool").unwrap(), Some(replacement));
         TOOL_SIGNATURE_DB.get().unwrap().lock().unwrap().take();
+    }
+
+    #[test]
+    fn test_tool_signatures_ttl_and_row_bound_pruning() {
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+        let conn = connect_db().unwrap();
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let old_time = now - (10 * 24 * 3600 * 1000); // 10 days ago (expired under 7-day TTL)
+        let fresh_time = now - (2 * 24 * 3600 * 1000); // 2 days ago (valid)
+
+        // Insert 3 expired signatures and 2 fresh signatures
+        for i in 1..=3 {
+            conn.execute(
+                "INSERT INTO tool_signatures (tool_id, signature, created_at) VALUES (?1, ?2, ?3)",
+                params![format!("old_tool_{}", i), "sig_old", old_time + i],
+            )
+            .unwrap();
+        }
+        for i in 1..=2 {
+            conn.execute(
+                "INSERT INTO tool_signatures (tool_id, signature, created_at) VALUES (?1, ?2, ?3)",
+                params![format!("fresh_tool_{}", i), "sig_fresh", fresh_time + i],
+            )
+            .unwrap();
+        }
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 5);
+
+        // 1. Test TTL pruning (7 days)
+        let deleted = prune_tool_signatures(&conn, 100, 7).unwrap();
+        assert_eq!(deleted, 3);
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+
+        // 2. Test row bounding (max_rows)
+        // Insert 10 additional signatures with ascending timestamps
+        for i in 1..=10 {
+            conn.execute(
+                "INSERT INTO tool_signatures (tool_id, signature, created_at) VALUES (?1, ?2, ?3)",
+                params![format!("bounded_tool_{}", i), "sig", now + i],
+            )
+            .unwrap();
+        }
+        // Total rows: 2 + 10 = 12
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 12);
+
+        // Bound to 5 rows (excess 7 rows should be pruned, keeping the 5 newest)
+        let deleted = prune_tool_signatures(&conn, 5, 0).unwrap();
+        assert_eq!(deleted, 7);
+
+        let final_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(final_count, 5);
+
+        // The remaining 5 tools should be the latest bounded_tool_6 through 10
+        let newest_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_signatures WHERE tool_id = 'bounded_tool_10'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1;
+        assert!(newest_exists);
+
+        let oldest_pruned: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_signatures WHERE tool_id = 'fresh_tool_1'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 0;
+        assert!(oldest_pruned);
+    }
+
+    #[test]
+    fn test_save_tool_signature_prunes_expired_signatures() {
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+        let conn = connect_db().unwrap();
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let expired = now - (15 * 24 * 3600 * 1000); // 15 days ago
+
+        // Insert an expired signature directly into the DB
+        conn.execute(
+            "INSERT INTO tool_signatures (tool_id, signature, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                "expired_tool",
+                "valid_base64_signature_here_which_is_long_enough",
+                expired
+            ],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Now calling save_tool_signature should automatically trigger pruning of expired entries
+        let sig = "s".repeat(60);
+        save_tool_signature("new_tool", &sig).unwrap();
+
+        // Expired signature must have been pruned, only new_tool remains
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tool_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+
+        let new_found = load_tool_signature("new_tool").unwrap();
+        assert_eq!(new_found, Some(sig));
+
+        let expired_found = load_tool_signature("expired_tool").unwrap();
+        assert_eq!(expired_found, None);
     }
 }
 
@@ -2028,6 +2252,92 @@ mod thinking_sqlite_tests {
             .unwrap();
         assert_eq!(sig_in_db, expected_base64);
     }
+
+    #[test]
+    fn test_delete_session_signatures_and_thinking_records_multi_tenant() {
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+
+        let sig = "EiYKJGUyNDgzMGE3LTVjZDYtNDJmZS05OThiLWVlNTM5ZTcyYjljMw==";
+
+        // 1. 准备多租户会话的思考记录
+        save_thinking_record(
+            "tenant_a:sess-compact",
+            "fp_1",
+            "thought 1",
+            Some(sig),
+            &[],
+            &[],
+            "vis 1",
+        )
+        .unwrap();
+        save_thinking_record(
+            "sess-compact",
+            "fp_2",
+            "thought 2",
+            Some(sig),
+            &[],
+            &[],
+            "vis 2",
+        )
+        .unwrap();
+        save_thinking_record(
+            "tenant_b:sess-other",
+            "fp_3",
+            "thought 3",
+            Some(sig),
+            &[],
+            &[],
+            "vis 3",
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_thinking_records("tenant_a:sess-compact")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(load_thinking_records("sess-compact").unwrap().len(), 1);
+        assert_eq!(
+            load_thinking_records("tenant_b:sess-other").unwrap().len(),
+            1
+        );
+
+        // 2. 准备会话作用域 tool_signatures
+        let scoped_key1 = format!("sess-compact\u{1f}call_1");
+        let scoped_key2 = format!("tenant_a:sess-compact\u{1f}call_2");
+        let scoped_key3 = format!("sess-other\u{1f}call_3");
+        save_tool_signature(&scoped_key1, sig).unwrap();
+        save_tool_signature(&scoped_key2, sig).unwrap();
+        save_tool_signature(&scoped_key3, sig).unwrap();
+
+        assert!(load_tool_signature(&scoped_key1).unwrap().is_some());
+        assert!(load_tool_signature(&scoped_key2).unwrap().is_some());
+        assert!(load_tool_signature(&scoped_key3).unwrap().is_some());
+
+        // 3. 执行 delete_tool_signatures_for_session("sess-compact")
+        let deleted_tools = delete_tool_signatures_for_session("sess-compact").unwrap();
+        assert_eq!(deleted_tools, 2);
+        assert!(load_tool_signature(&scoped_key1).unwrap().is_none());
+        assert!(load_tool_signature(&scoped_key2).unwrap().is_none());
+        assert!(load_tool_signature(&scoped_key3).unwrap().is_some());
+
+        // 4. 执行 delete_thinking_records_for_session("sess-compact") 支持租户前缀匹配
+        let deleted_records = delete_thinking_records_for_session("sess-compact").unwrap();
+        assert_eq!(deleted_records, 2);
+        assert_eq!(
+            load_thinking_records("tenant_a:sess-compact")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(load_thinking_records("sess-compact").unwrap().len(), 0);
+        assert_eq!(
+            load_thinking_records("tenant_b:sess-other").unwrap().len(),
+            1
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2077,6 +2387,33 @@ mod retention_tests {
                 .is_err()
         );
         assert!(get_log_detail("no-room").is_err());
+    }
+
+    #[test]
+    fn test_proxy_db_upstream_model_roundtrip() {
+        use crate::proxy::monitor::prompt_log_tests::{sample_log, TestDataDir};
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+
+        let mut log = sample_log("upstream-test", 100);
+        log.model = Some("gpt-4o".to_string());
+        log.mapped_model = Some("gemini-2.5-pro".to_string());
+        log.upstream_model = Some("gemini-2.5-pro-preview-05-06".to_string());
+
+        save_log(log.clone()).unwrap();
+
+        let detail = get_log_detail("upstream-test").unwrap();
+        assert_eq!(
+            detail.upstream_model.as_deref(),
+            Some("gemini-2.5-pro-preview-05-06")
+        );
+
+        let summaries = get_logs(10).unwrap();
+        let found = summaries.iter().find(|l| l.id == "upstream-test").unwrap();
+        assert_eq!(
+            found.upstream_model.as_deref(),
+            Some("gemini-2.5-pro-preview-05-06")
+        );
     }
 
     #[test]
@@ -2319,9 +2656,9 @@ pub fn get_logs_filtered(
     let sql = if errors_only {
         "SELECT id, timestamp, method, url, status, duration, model, substr(error, 1, 1024),
                 NULL as request_body, NULL as upstream_request_body, NULL as response_body,
-                input_tokens, output_tokens, cached_tokens, account_email, mapped_model, protocol, client_ip, username,
-                NULL as request_headers, NULL as upstream_request_headers, NULL as response_headers,
-                session_id
+                input_tokens, output_tokens, cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
+                NULL as request_headers, NULL as upstream_request_headers, response_headers,
+                session_id, upstream_model
          FROM request_logs
          WHERE (status < 200 OR status >= 400)
          ORDER BY timestamp DESC
@@ -2329,18 +2666,18 @@ pub fn get_logs_filtered(
     } else if filter.is_empty() {
         "SELECT id, timestamp, method, url, status, duration, model, substr(error, 1, 1024),
                 NULL as request_body, NULL as upstream_request_body, NULL as response_body,
-                input_tokens, output_tokens, cached_tokens, account_email, mapped_model, protocol, client_ip, username,
-                NULL as request_headers, NULL as upstream_request_headers, NULL as response_headers,
-                session_id
+                input_tokens, output_tokens, cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
+                NULL as request_headers, NULL as upstream_request_headers, response_headers,
+                session_id, upstream_model
          FROM request_logs
          ORDER BY timestamp DESC
          LIMIT ?1 OFFSET ?2"
     } else {
         "SELECT id, timestamp, method, url, status, duration, model, substr(error, 1, 1024),
                 NULL as request_body, NULL as upstream_request_body, NULL as response_body,
-                input_tokens, output_tokens, cached_tokens, account_email, mapped_model, protocol, client_ip, username,
-                NULL as request_headers, NULL as upstream_request_headers, NULL as response_headers,
-                session_id
+                input_tokens, output_tokens, cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
+                NULL as request_headers, NULL as upstream_request_headers, response_headers,
+                session_id, upstream_model
          FROM request_logs
          WHERE (url LIKE ?3 OR method LIKE ?3 OR model LIKE ?3 OR CAST(status AS TEXT) LIKE ?3 OR account_email LIKE ?3 OR client_ip LIKE ?3 OR session_id LIKE ?3)
          ORDER BY timestamp DESC
@@ -2381,9 +2718,9 @@ pub fn get_all_logs_for_export() -> Result<Vec<ProxyRequestLog>, String> {
         .prepare(
             "SELECT id, timestamp, method, url, status, duration, model, error,
                 request_body, upstream_request_body, response_body, input_tokens, output_tokens,
-                cached_tokens, account_email, mapped_model, protocol, client_ip, username,
+                cached_tokens, reasoning_tokens, account_email, mapped_model, protocol, client_ip, username,
                 request_headers, upstream_request_headers, response_headers,
-                session_id
+                session_id, upstream_model
          FROM request_logs
          ORDER BY timestamp DESC",
         )

@@ -3,14 +3,6 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 
 fn get_antigravity_path(target_ide: Option<&str>) -> Option<PathBuf> {
-    if let Ok(config) = crate::modules::config::load_app_config() {
-        if let Some(path_str) = config.antigravity_executable {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
     crate::modules::process::get_antigravity_executable_path(target_ide)
 }
 
@@ -42,13 +34,10 @@ pub fn get_all_candidate_db_paths(target_ide: Option<&str>) -> Vec<PathBuf> {
     }
 
     let folder_names: &[&str] = if target_ide == Some("ide") {
-        &["Antigravity IDE", "Antigravity"]
-    } else if target_ide == Some("code") || target_ide == Some("cursor") {
-        &["Antigravity", "Antigravity IDE"]
-    } else if target_ide == Some("classic") {
-        &["Antigravity"]
+        &["Antigravity IDE", "antigravity-ide", "antigravity_ide"]
     } else {
-        &["Antigravity", "Antigravity IDE"]
+        // target_ide = None 或 classic / code / cursor: 严格使用 Antigravity，严禁回退至 Antigravity IDE
+        &["Antigravity"]
     };
 
     #[cfg(target_os = "macos")]
@@ -83,6 +72,16 @@ pub fn get_all_candidate_db_paths(target_ide: Option<&str>) -> Vec<PathBuf> {
     }
 
     paths
+}
+
+/// 扫描本地所有 Antigravity 数据库候选路径（同时覆盖经典款 Antigravity 与 Antigravity IDE）
+pub fn get_all_antigravity_db_paths() -> Vec<PathBuf> {
+    let mut all_paths = Vec::new();
+    all_paths.extend(get_all_candidate_db_paths(Some("classic")));
+    all_paths.extend(get_all_candidate_db_paths(Some("ide")));
+    let mut seen = std::collections::HashSet::new();
+    all_paths.retain(|p| seen.insert(p.clone()));
+    all_paths
 }
 
 /// Get Antigravity database path (cross-platform)
@@ -288,4 +287,47 @@ pub fn write_service_machine_id(
     ));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ide_candidate_db_paths_includes_all_naming_variants() {
+        let ide_candidates = get_all_candidate_db_paths(Some("ide"));
+        let path_strings: Vec<String> = ide_candidates
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        // 验证候选路径包含三种标准命名变体：空格、中划线与下划线
+        let has_space_variant = path_strings.iter().any(|s| s.contains("Antigravity IDE"));
+        let has_kebab_variant = path_strings.iter().any(|s| s.contains("antigravity-ide"));
+        let has_snake_variant = path_strings.iter().any(|s| s.contains("antigravity_ide"));
+
+        assert!(
+            has_space_variant,
+            "IDE candidates must include 'Antigravity IDE'"
+        );
+        assert!(
+            has_kebab_variant,
+            "IDE candidates must include kebab-case 'antigravity-ide'"
+        );
+        assert!(
+            has_snake_variant,
+            "IDE candidates must include snake-case 'antigravity_ide'"
+        );
+
+        // 验证严格隔离：针对 IDE 目标绝不包含纯经典版 'Antigravity/User/globalStorage' 路径
+        for p in &path_strings {
+            let is_classic = p.ends_with("Antigravity/User/globalStorage/state.vscdb")
+                || p.ends_with("Antigravity\\User\\globalStorage\\state.vscdb");
+            assert!(
+                !is_classic,
+                "IDE candidate paths must not contain classic Antigravity path: {}",
+                p
+            );
+        }
+    }
 }
