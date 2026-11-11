@@ -34,12 +34,21 @@ const ALIAS_TO_CANONICAL: Record<string, { id: string; name: string; group: stri
     'gemini-3.1-flash-image': { id: 'gemini-3.1-flash-image', name: 'gemini-3.1-flash-image', group: 'Gemini 3' },
     'gemini-3-pro-image': { id: 'gemini-3-pro-image', name: 'gemini-3-pro-image', group: 'Gemini 3' },
 
-    // Claude (基准线 >= 4.6)
+    // Claude 5.5 & 4.6 (基准线 >= 4.6)
+    'claude-opus-5-5': { id: 'claude-opus-5-5', name: 'claude-opus-5-5', group: 'Claude' },
+    'claude-opus-5-5-high': { id: 'claude-opus-5-5-high', name: 'claude-opus-5-5-high', group: 'Claude' },
+    'claude-opus-5-5-medium': { id: 'claude-opus-5-5-medium', name: 'claude-opus-5-5-medium', group: 'Claude' },
+    'claude-opus-5-5-low': { id: 'claude-opus-5-5-low', name: 'claude-opus-5-5-low', group: 'Claude' },
+    'claude-sonnet-5-5': { id: 'claude-sonnet-5-5', name: 'claude-sonnet-5-5', group: 'Claude' },
+    'claude-sonnet-5-5-high': { id: 'claude-sonnet-5-5-high', name: 'claude-sonnet-5-5-high', group: 'Claude' },
+    'claude-sonnet-5-5-medium': { id: 'claude-sonnet-5-5-medium', name: 'claude-sonnet-5-5-medium', group: 'Claude' },
+    'claude-sonnet-5-5-low': { id: 'claude-sonnet-5-5-low', name: 'claude-sonnet-5-5-low', group: 'Claude' },
     'claude-sonnet-4-6': { id: 'claude-sonnet-4-6', name: 'claude-sonnet-4-6', group: 'Claude' },
     'claude-opus-4-6': { id: 'claude-opus-4-6', name: 'claude-opus-4-6', group: 'Claude' },
     'claude-opus-4-6-thinking': { id: 'claude-opus-4-6-thinking', name: 'claude-opus-4-6-thinking', group: 'Claude' },
 
     // OpenAI (以官方为准)
+    'gpt-oss-120b': { id: 'gpt-oss-120b', name: 'gpt-oss-120b', group: 'Other' },
     'gpt-oss-120b-medium': { id: 'gpt-oss-120b-medium', name: 'gpt-oss-120b-medium', group: 'Other' },
 };
 
@@ -49,7 +58,18 @@ function isCompliantModel(
     activeFlashMinorFloor?: number
 ): boolean {
     const m = key.toLowerCase().trim();
-    if (m.startsWith('chat_') || m.includes('internal') || m.includes('-exp')) {
+    if (
+        m.includes('-disabled') ||
+        m.endsWith('_disabled') ||
+        m.startsWith('chat_') ||
+        m.startsWith('tab_') ||
+        m.includes('internal') ||
+        m.includes('-exp') ||
+        m.endsWith('-agent') ||
+        m === 'gemini-3-flash' ||
+        // 未在官方可用集合里的字典残留（已从后端可用集合移除）
+        m === 'gemini-3.1-flash-lite'
+    ) {
         return false;
     }
 
@@ -59,34 +79,72 @@ function isCompliantModel(
         return false;
     }
 
-    // 2. 特许放行的特定官方核心与专用模型 (Lite 专用系列 / Agent 系列 / 绘图系列)
+    // 2. 特许放行的特定官方核心与专用模型 (Lite 专用系列 / 绘图系列)
     if (
-        m === 'gemini-pro-agent' ||
-        m === 'gemini-3-flash-agent' ||
         m === 'gemini-3.5-flash-lite' ||
-        m === 'gemini-3.1-flash-lite' ||
         m === 'gemini-flash-lite' ||
-        m === 'tab_flash_lite_preview' ||
-        m === 'tab_jump_flash_lite_preview' ||
         m === 'gemini-3.1-flash-image' ||
         m === 'gemini-3-pro-image'
     ) {
         return true;
     }
 
-    // 3. 淘汰老旧 2.5 及以下系列
-    if (m.includes('2.5') || m.includes('2-5') || m.includes('gemini-1.') || m.includes('gemini-2.')) {
+    // 3. 淘汰老旧 2.5、3.5(非lite)、3.6、3.7 及以下系列
+    if (
+        m.includes('2.5') ||
+        m.includes('2-5') ||
+        m.includes('gemini-1.') ||
+        m.includes('gemini-2.') ||
+        m.includes('3.5-flash') ||
+        m.includes('3.6-flash') ||
+        m.includes('3.7-flash')
+    ) {
         return false;
     }
 
-    // 4. Claude 淘汰基准线 4.6 以下旧模型
+    // 4. Claude 系列：以 4.6 为基准线（支持 4.6 与 5.5+，支持 Haiku >= 4.5 与 Fable >= 5.0），淘汰非法 thinking 组合
     if (m.includes('claude')) {
-        return m.includes('4-6') || m.includes('4.6') || m.includes('5-') || m.includes('5.');
+        if ((m.startsWith('claude-sonnet-') || m.includes('-5-5')) && m.includes('thinking')) return false;
+
+        const tokens = m.split(/[-_.]/);
+        let detectedMajor: number | null = null;
+        let detectedMinor = 0;
+        let i = 0;
+        while (i < tokens.length) {
+            const tok = tokens[i];
+            if (tok.length === 8 && (tok.startsWith('202') || tok.startsWith('201'))) {
+                i++;
+                continue;
+            }
+            const major = parseInt(tok, 10);
+            if (!isNaN(major) && major < 1000) {
+                detectedMajor = major;
+                if (i + 1 < tokens.length) {
+                    const nextTok = tokens[i + 1];
+                    if (!(nextTok.length === 8 && (nextTok.startsWith('202') || nextTok.startsWith('201')))) {
+                        const minor = parseInt(nextTok, 10);
+                        if (!isNaN(minor) && minor < 1000) {
+                            detectedMinor = minor;
+                            i++;
+                        }
+                    }
+                }
+                break;
+            }
+            i++;
+        }
+
+        if (detectedMajor !== null) {
+            if (m.includes('fable') || m.includes('mythos')) {
+                return detectedMajor >= 5;
+            }
+            return detectedMajor > 4 || (detectedMajor === 4 && detectedMinor >= 6);
+        }
+        return false;
     }
 
     // 5. 针对 Gemini 3 Flash 系列思考/推理模型剪枝：
-    // 注意：必须排除 lite、image、agent 等特殊独立专用模型！lite 系列是超低延迟独立赛道，不受 3.8 Flash 思考模型基准线影响！
-    if (m.includes('lite') || m.includes('image') || m.includes('agent')) {
+    if (m.includes('lite') || m.includes('image')) {
         return true;
     }
 
@@ -140,7 +198,8 @@ export const useProxyModels = () => {
         // 0.1 探测当前账号池中 Gemini 3 Flash 家族最高活跃小版本 (如 3.8)，以便自动收敛淘汰已被替代的过渡小版本
         let maxGemini3FlashMinor = 8; // 默认以当前 3.8 为基准
         for (const account of accounts) {
-            for (const m of account.quota?.models ?? []) {
+            const modelsList = Array.isArray(account.quota?.models) ? account.quota.models : [];
+            for (const m of modelsList) {
                 const nameLower = m.name.toLowerCase().trim();
                 const match = nameLower.match(/gemini-3\.(\d+)-flash/);
                 if (match) {
@@ -154,7 +213,8 @@ export const useProxyModels = () => {
 
         // 1. 以真实账号上报的动态模型为第一权威真理源 (Single Source of Truth)
         for (const account of accounts) {
-            for (const m of account.quota?.models ?? []) {
+            const modelsList = Array.isArray(account.quota?.models) ? account.quota.models : [];
+            for (const m of modelsList) {
                 const rawKey = m.name.toLowerCase().trim();
                 if (!isCompliantModel(rawKey, deprecatedSet, maxGemini3FlashMinor)) {
                     continue;
@@ -188,7 +248,7 @@ export const useProxyModels = () => {
         // 1.5 动态档位后缀剥离与裸模型派生（与后端算法完全对齐，纯通用数据驱动）
         const derivedBares: string[] = [];
         for (const id of uniqueModelsMap.keys()) {
-            for (const suffix of ['-tiered', '-high', '-medium', '-low', '-extra-low']) {
+            for (const suffix of ['-tiered', '-high', '-medium', '-low', '-extra-low', '-thinking']) {
                 if (id.endsWith(suffix)) {
                     const base = id.slice(0, -suffix.length);
                     if (base && isCompliantModel(base, deprecatedSet, maxGemini3FlashMinor) && !uniqueModelsMap.has(base)) {

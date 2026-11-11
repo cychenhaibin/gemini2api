@@ -65,9 +65,18 @@ pub async fn handle_warmup(
 ) -> Response {
     let start_time = std::time::Instant::now();
 
+    let mapped_model = {
+        let custom_mapping = state.custom_mapping.read().await;
+        crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+            &req.model,
+            &custom_mapping,
+            None,
+        )
+    };
+
     info!(
-        "[Warmup-API] ========== START: email={}, model={} ==========",
-        req.email, req.model
+        "[Warmup-API] ========== START: email={}, model={} (mapped={}) ==========",
+        req.email, req.model, mapped_model
     );
 
     // ===== 步骤 1: 获取 Token =====
@@ -96,8 +105,8 @@ pub async fn handle_warmup(
                         status: 400,
                         duration,
                         model: Some(req.model.clone()),
-                        mapped_model: Some(req.model.clone()),
-                        upstream_model: Some(req.model.clone()),
+                        mapped_model: Some(mapped_model.clone()),
+                        upstream_model: Some(mapped_model.clone()),
                         account_email: Some(req.email.clone()),
                         client_ip: Some("127.0.0.1".to_string()),
                         error: Some(format!("Token Error (非服务端故障): {}", e)),
@@ -141,9 +150,76 @@ pub async fn handle_warmup(
             }
         };
 
+    // [测试专用] 模拟上游未响应 / 无请求回报（网络连接超时或分阶段传输中断）
+    if req.model == "simulate_no_response" || req.model == "simulate-no-response" {
+        let duration = 15000;
+        let log_id = uuid::Uuid::new_v4().to_string();
+        let diag = "请求上游接口时网络连接失败，未收到上游请求回报（非网关服务端故障，请排查网络或代理）：Upstream send failed at https://daily-cloudcode-pa.googleapis.com/v1internal (method=streamGenerateContent, stage=upload, upload_budget=15s): Upload budget exhausted after 15s of transfer (sent 9175040/10168215 bytes, no response received)。".to_string();
+        let sug = "请检查系统代理、上游节点连通性或本地网络设置，确保能正常连接上游服务，并可在「超时设置」中调整分阶段传输预算。".to_string();
+
+        let log = ProxyRequestLog {
+            id: log_id.clone(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            method: "POST".to_string(),
+            url: format!("/internal/warmup -> {}", req.model),
+            status: 502,
+            duration,
+            model: Some(req.model.clone()),
+            mapped_model: Some(mapped_model.clone()),
+            upstream_model: Some(mapped_model.clone()),
+            account_email: Some(req.email.clone()),
+            client_ip: Some("127.0.0.1".to_string()),
+            error: Some("Network Error: Upstream send failed (未收到请求回报)".to_string()),
+            request_body: Some(format!(
+                "{{\"type\": \"warmup\", \"model\": \"{}\"}}",
+                req.model
+            )),
+            upstream_request_body: None,
+            response_body: Some(diag.clone()),
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            protocol: Some("warmup".to_string()),
+            username: None,
+            request_headers: None,
+            upstream_request_headers: None,
+            response_headers: None,
+            session_id: None,
+        };
+        state.monitor.log_request(log).await;
+
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(WarmupResponse {
+                success: false,
+                message: format!("【网络请求异常（非服务端故障）】 {}", diag),
+                log_id: Some(log_id),
+                duration_ms: Some(duration),
+                status: Some(502),
+                account_email: Some(req.email.clone()),
+                account_id: if account_id.is_empty() {
+                    None
+                } else {
+                    Some(account_id.clone())
+                },
+                is_retired: None,
+                error: Some(format!(
+                    "【网络请求异常（非服务端故障）】\n诊断: {}\n建议: {}",
+                    diag, sug
+                )),
+                is_server_error: Some(false),
+                error_type: Some("upstream_network_error".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
     // ===== 步骤 2: 根据模型类型构建请求体 =====
-    let is_claude = req.model.to_lowercase().contains("claude");
-    let is_image = req.model.to_lowercase().contains("image");
+    let is_claude = mapped_model.to_lowercase().contains("claude")
+        || req.model.to_lowercase().contains("claude");
+    let is_image =
+        mapped_model.to_lowercase().contains("image") || req.model.to_lowercase().contains("image");
 
     let body: Value = if is_claude {
         // Claude 模型：使用 transform_claude_request_in 转换
@@ -153,7 +229,7 @@ pub async fn handle_warmup(
             &uuid::Uuid::new_v4().to_string()[..8]
         );
         let claude_request = crate::proxy::mappers::claude::models::ClaudeRequest {
-            model: req.model.clone(),
+            model: mapped_model.clone(),
             messages: vec![crate::proxy::mappers::claude::models::Message {
                 role: "user".to_string(),
                 content: crate::proxy::mappers::claude::models::MessageContent::String(
@@ -202,8 +278,8 @@ pub async fn handle_warmup(
                     status: 400,
                     duration,
                     model: Some(req.model.clone()),
-                    mapped_model: Some(req.model.clone()),
-                    upstream_model: Some(req.model.clone()),
+                    mapped_model: Some(mapped_model.clone()),
+                    upstream_model: Some(mapped_model.clone()),
                     account_email: Some(req.email.clone()),
                     client_ip: Some("127.0.0.1".to_string()),
                     error: Some(format!("Transform Error (非服务端故障): {}", e)),
@@ -259,7 +335,7 @@ pub async fn handle_warmup(
 
         let base_request = if is_image {
             json!({
-                "model": req.model,
+                "model": mapped_model,
                 "contents": [{"role": "user", "parts": [{"text": "Say hi"}]}],
                 "generationConfig": {
                     "maxOutputTokens": 10,
@@ -270,7 +346,7 @@ pub async fn handle_warmup(
             })
         } else {
             json!({
-                "model": req.model,
+                "model": mapped_model,
                 "contents": [{"role": "user", "parts": [{"text": "Say hi"}]}],
                 "generationConfig": {
                     "temperature": 0
@@ -282,7 +358,7 @@ pub async fn handle_warmup(
         wrap_request(
             &base_request,
             &project_id,
-            &req.model,
+            &mapped_model,
             None,
             Some(&session_id),
             None,
@@ -294,7 +370,7 @@ pub async fn handle_warmup(
         .or_else(|_| serde_json::to_string(&body))
         .ok();
 
-    let model_lower = req.model.to_lowercase();
+    let model_lower = mapped_model.to_lowercase();
     let prefer_non_stream = model_lower.contains("flash-lite") || model_lower.contains("2.5-pro");
 
     let (method, query) = if prefer_non_stream {
@@ -351,8 +427,8 @@ pub async fn handle_warmup(
                 };
 
                 info!(
-                    "[Warmup-API] ========== SUCCESS: {} / {} ({}ms, retired={}) ==========",
-                    req.email, req.model, duration, is_retired
+                    "[Warmup-API] ========== SUCCESS: {} / {} -> {} ({}ms, retired={}) ==========",
+                    req.email, req.model, mapped_model, duration, is_retired
                 );
 
                 // 记录成功预热请求到流量日志
@@ -365,8 +441,8 @@ pub async fn handle_warmup(
                     status: status_code,
                     duration,
                     model: Some(req.model.clone()),
-                    mapped_model: Some(req.model.clone()),
-                    upstream_model: Some(req.model.clone()),
+                    mapped_model: Some(mapped_model.clone()),
+                    upstream_model: Some(mapped_model.clone()),
                     account_email: Some(req.email.clone()),
                     client_ip: Some("127.0.0.1".to_string()),
                     error: if is_retired {
@@ -481,8 +557,8 @@ pub async fn handle_warmup(
                     status: status_code,
                     duration,
                     model: Some(req.model.clone()),
-                    mapped_model: Some(req.model.clone()),
-                    upstream_model: Some(req.model.clone()),
+                    mapped_model: Some(mapped_model.clone()),
+                    upstream_model: Some(mapped_model.clone()),
                     account_email: Some(req.email.clone()),
                     client_ip: Some("127.0.0.1".to_string()),
                     error: Some(format!("HTTP {} (上游拒绝，非服务端故障)", status_code)),
@@ -505,14 +581,52 @@ pub async fn handle_warmup(
                 };
                 state.monitor.log_request(log).await;
 
+                // 检查是否命中 User-Agent 门禁或全池临时熔断
+                let custom_ua = state.upstream.get_user_agent_override().await;
+                let lang = crate::modules::config::load_app_config()
+                    .ok()
+                    .map(|c| c.language)
+                    .unwrap_or_else(|| "zh".to_string());
+                let i18n_err = crate::modules::i18n::get_gateway_error_strings(&lang);
+
+                let (final_message, error_detail, error_type) =
+                    if let Some((title, diag, sug, _category, err_code)) =
+                        crate::proxy::handlers::common::check_outdated_user_agent_issue_with_lang(
+                            &req.model,
+                            status_code,
+                            &error_text,
+                            custom_ua.as_deref(),
+                            Some(&lang),
+                        )
+                    {
+                        (
+                            format!("{} {}", title, diag),
+                            Some(format!(
+                                "{}\n{} {}\n{} {}",
+                                title,
+                                i18n_err.label_diagnosis,
+                                diag,
+                                i18n_err.label_suggestion,
+                                sug
+                            )),
+                            Some(err_code.to_string()),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "Warmup failed: HTTP {} (上游拒绝，非服务端故障)",
+                                status_code
+                            ),
+                            Some(error_text),
+                            Some("upstream_error".to_string()),
+                        )
+                    };
+
                 (
                     StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
                     Json(WarmupResponse {
                         success: false,
-                        message: format!(
-                            "Warmup failed: HTTP {} (上游拒绝，非服务端故障)",
-                            status_code
-                        ),
+                        message: final_message,
                         log_id: Some(log_id),
                         duration_ms: Some(duration),
                         status: Some(status_code),
@@ -523,9 +637,9 @@ pub async fn handle_warmup(
                             Some(account_id.clone())
                         },
                         is_retired: None,
-                        error: Some(error_text),
+                        error: error_detail,
                         is_server_error: Some(status_code >= 500),
-                        error_type: Some("upstream_error".to_string()),
+                        error_type,
                     }),
                 )
                     .into_response()
@@ -535,7 +649,7 @@ pub async fn handle_warmup(
             if let Ok(email_val) = axum::http::HeaderValue::from_str(&req.email) {
                 response.headers_mut().insert("X-Account-Email", email_val);
             }
-            if let Ok(model_val) = axum::http::HeaderValue::from_str(&req.model) {
+            if let Ok(model_val) = axum::http::HeaderValue::from_str(&mapped_model) {
                 response.headers_mut().insert("X-Mapped-Model", model_val);
             }
 
@@ -558,8 +672,8 @@ pub async fn handle_warmup(
                 status: 502,
                 duration,
                 model: Some(req.model.clone()),
-                mapped_model: Some(req.model.clone()),
-                upstream_model: Some(req.model.clone()),
+                mapped_model: Some(mapped_model.clone()),
+                upstream_model: Some(mapped_model.clone()),
                 account_email: Some(req.email.clone()),
                 client_ip: Some("127.0.0.1".to_string()),
                 error: Some(format!("Network Error (网络请求异常，非服务端故障): {}", e)),
@@ -608,11 +722,50 @@ pub async fn handle_warmup(
             if let Ok(email_val) = axum::http::HeaderValue::from_str(&req.email) {
                 response.headers_mut().insert("X-Account-Email", email_val);
             }
-            if let Ok(model_val) = axum::http::HeaderValue::from_str(&req.model) {
+            if let Ok(model_val) = axum::http::HeaderValue::from_str(&mapped_model) {
                 response.headers_mut().insert("X-Mapped-Model", model_val);
             }
 
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_warmup_model_route_resolution() {
+        let mut custom_mapping = HashMap::new();
+
+        // 裸模型 gemini-3.8-flash 必须被映射为具备官方实体的具名档位 (gemini-3.8-flash-tiered)
+        let mapped_flash = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+            "gemini-3.8-flash",
+            &custom_mapping,
+            None,
+        );
+        assert_eq!(mapped_flash, "gemini-3.8-flash-tiered");
+
+        // 已带档位的具名模型保持不变
+        let mapped_high = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+            "gemini-3.8-flash-high",
+            &custom_mapping,
+            None,
+        );
+        assert_eq!(mapped_high, "gemini-3.8-flash-high");
+
+        // 自定义映射优先起效
+        custom_mapping.insert(
+            "gpt-oss-120b".to_string(),
+            "gpt-oss-120b-medium".to_string(),
+        );
+        let mapped_gpt = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+            "gpt-oss-120b",
+            &custom_mapping,
+            None,
+        );
+        assert_eq!(mapped_gpt, "gpt-oss-120b-medium");
     }
 }

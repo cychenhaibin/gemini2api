@@ -21,6 +21,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
     const { t, i18n } = useTranslation();
     const [isAuthenticated, setIsAuthenticated] = useState(isTauri());
     const [apiKey, setApiKey] = useState('');
+    const [rememberMe, setRememberMe] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
 
@@ -28,18 +29,19 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
         if (isTauri()) return;
 
         const sessionKey = sessionStorage.getItem('abv_admin_api_key');
+        const savedKey = localStorage.getItem('abv_admin_api_key');
+
         if (sessionKey) {
             setIsAuthenticated(true);
             setApiKey(sessionKey);
-            return;
-        }
-
-        const savedKey = localStorage.getItem('abv_admin_api_key');
-        if (savedKey) {
+            if (savedKey) {
+                setRememberMe(true);
+            }
+        } else if (savedKey) {
             sessionStorage.setItem('abv_admin_api_key', savedKey);
-            localStorage.removeItem('abv_admin_api_key');
             setIsAuthenticated(true);
             setApiKey(savedKey);
+            setRememberMe(true);
         }
 
         const handleUnauthorized = () => {
@@ -73,13 +75,23 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
             });
 
             if (response.ok || response.status === 204) {
-                localStorage.removeItem('abv_admin_api_key');
+                if (rememberMe) {
+                    localStorage.setItem('abv_admin_api_key', trimmedKey);
+                } else {
+                    localStorage.removeItem('abv_admin_api_key');
+                }
                 setIsAuthenticated(true);
                 window.location.reload();
             } else if (response.status === 401) {
                 sessionStorage.removeItem('abv_admin_api_key');
+                localStorage.removeItem('abv_admin_api_key');
                 setError(t('login.error_invalid_key'));
             } else {
+                if (rememberMe) {
+                    localStorage.setItem('abv_admin_api_key', trimmedKey);
+                } else {
+                    localStorage.removeItem('abv_admin_api_key');
+                }
                 setIsAuthenticated(true);
                 window.location.reload();
             }
@@ -168,6 +180,16 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
                     </div>
 
                     {error && <p className="text-xs text-red-500">{error}</p>}
+
+                    <label className="flex cursor-pointer select-none items-center gap-2 px-1 text-xs text-muted-foreground">
+                        <input
+                            type="checkbox"
+                            checked={rememberMe}
+                            onChange={(e) => setRememberMe(e.target.checked)}
+                            className="h-4 w-4 rounded border-border accent-primary"
+                        />
+                        <span>{t('login.remember_me')}</span>
+                    </label>
 
                     <Button
                         type="submit"

@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-> 专业级 AI 账号管理与协议代理系统 (v4.9.8)
+> 专业级 AI 账号管理与协议代理系统 (v5.0.3)
 
 <div align="center">
   <img src="public/icon.png" width="100" height="100" alt="Antigravity Tools Logo">
@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/github/v/release/lbjlaq/Antigravity-Manager?color=blue&style=flat-square" alt="GitHub release">
     </a>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.9.8-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-5.0.3-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -321,6 +321,27 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8045"
 claude
 ```
 
+### 终端原生切号工具 (`at` / `antigravity-tools`) 使用说明
+Antigravity 内置原生轻量级 CLI 切号套件，专为终端开发者打造，支持秒级轮换系统 Keychain 账号，并可在切换后自动接续 `agy` 交互式会话：
+
+```bash
+# 1. 查看所有账号列表、当前激活指示符 (👉) 与状态
+at list
+
+# 2. 查看当前在 agy CLI (Keychain)、IDE 分别生效的账号邮箱
+at current
+
+# 3. 切换账号 (支持序号、邮箱完整或前缀、账号别名)
+at switch 2                      # 切到序号 #2 的账号
+at switch work@gmail.com         # 按邮箱切号
+at switch work                   # 按邮箱前缀模糊切号
+at switch "工作号"               # 按账号别名切号
+at switch                        # 无参自动环形轮换 (Round-Robin) 至下一可用账号
+
+# 4. 切号并自动接续 agy 会话 (恢复上一次问答上下文)
+at switch 2 -c                   # -c 等价于 --continue
+```
+
 ### 如何接入 OpenCode?
 1.  进入 **API 反代**页面 → **外部 Providers** → 点击 **OpenCode Sync** 卡片。
 2.  点击 **Sync** 按钮，将自动生成 `~/.config/opencode/opencode.json` 配置文件：
@@ -494,7 +515,7 @@ response = client.chat.completions.create(
 
 ## 📝 更新日志
 
-> 最新版本 **v4.9.8**（2026-10-17）：Antigravity 经典款配额耗尽/低于阈值全自动无感热切换与双核算力池监控（Ref #3509）；原生全面演进支持 Antigravity CLI (`agy`)，自动 Shell Wrapper 注入与模型思考档位智能拆解，三端（经典款 / IDE / CLI）活动账号独立探查与情境化多端徽章（Ref #3686, Ref #3630）；403 错误详情全量捕获与动作链接提取（人机验证/申诉），临时验证与永久禁用严格解耦，配额恢复全自动闭环自愈（Ref #3630, Ref #3684）；对齐 Claude Code 2.1.301 协议规范与 Agent SDK 开场白防 WAF 身份清洗，全链路下行注入 `request-id`，录入 Claude 5 全系 8 个核心模型（PR #3689, Ref #3684, Ref #3686）；JSON Schema 活跃引用追踪阻断循环展开指数爆炸杜绝 Linux VPS OOM (SIGKILL 137) 崩溃，规范化数组非法 properties 与终态 ARRAY 守卫规避 Gemini 400 报错，推理/思考模型流式首包 Peek 超时自适应放宽至 60s/90s/120s 杜绝 30s 误杀，账号池两阶段原子同步加载彻底消除并发 503 闪断，限流防倒退校验与 RPC details 全量遍历（PR #3694, Fixes #3690, Ref #3682, Ref #3693）；彻底剔除 100% 报 429 的 Prod 生产公共端点，流式接口首包超时保底放宽至 120s，Responses 格式数组 input 完整还原多轮角色边界，根除 0ms 乐观重置风暴（PR #3691, PR #3672, PR #3687, PR #3685, Fixes #3506, Ref #3525）；流量监控报文详情重构为 Postman 风格单 Tab 视窗、正文「结构化拆分」与「原始代码」双视图、两列键值对表格与 Bearer 掩码脱敏、标准双链路 HAR 1.2 导出，全量覆盖 12 种系统语言（感谢 @cubelikeplayDaniel, @EricZhou05, @blackdm666, @jeikl）。
+> 最新版本 **v5.0.3**（2026-11-06）：配额归因治理与调度内核重构——网关内部限流判据收敛至 `policy::is_internal_gateway_exhaustion` 单一权威源（根除占全量 5xx 92.6% 的 503 归因污染），新增 403 封禁专用归因 `account_forbidden`；将「上游告知的配额耗尽」与自适应熔断彻底解耦（熔断关闭时仍能锁定 `QuotaExhausted` 账号），重试循环引入 `attempted_accounts` 账号排除防反复锤击，并将配额过滤前置于优先级收敛以消除 0 配额高优账号饥饿全池的优先级倒置死锁 (Fixes #3838, #3841, PR #3845)；蹬额度模式由暴力禁用重构为最高调度优先级竞争，保住 Prompt Cache 并自动外溢并发流量 (PR #3840)；超时契约解除 135s/160s 硬截断，首字基准恢复 180s、多模态上限 270s、全局预算统一下沉 pipeline，Codex / Legacy 流式收敛至统一生命周期并补齐思考期自适应跃迁 (Fixes #3816, #3821, Ref #3763)；模型路由确立自定义映射最高优先级、旧版模型硬下线与先映射后判定、号池自适应暗路由与上游物理模型统一收敛至 `X-Upstream-Model` (Fixes #2065, Ref #3764, #3769, #3815)；多模态坏图 400 就地自愈与指纹黑名单、保鲜滑窗默认开启、Responses 协议日志脱敏与视觉 Token 估算 (Fixes #3758, #3824, #3756)；提示词清洗分轨保护用户正文、CTF 策略自适应剥离与 Gzip 入站解压 (Fixes #3764, #3781)；GCP Vertex AI 企业账号与 Project ID 一键获取、Antigravity IDE 2.6.0+ 三级双写切号与进程身份收敛、账号删除一致性、Web/Docker OAuth 与更新设置修复、DeepSeek Harness 一键同步 (Fixes #3823, #3829, #3806, #3802, #3754)；Linux 远程桌面保活、macOS Mini 视窗主线程调度、界面与字体缩放及托盘交互优化 (Fixes #3752, #3757, #3744)；工具签名缓存写入放大治理与 Token 双视角 + TTFT 统计、QoS 死锁修复 (PR #3765, PR #3774, Fixes #3810, #3749)；多智能体根会话归一化与凭据级强粘性、3P 幽灵配额治理 (Fixes #3789, #3809)。
 
 👉 **[查看完整更新日志 CHANGELOG.md →](CHANGELOG.md)**
 

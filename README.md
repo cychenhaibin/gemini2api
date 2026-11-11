@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-> Professional Account Management & Protocol Proxy System for AI Services (v4.9.8)
+> Professional Account Management & Protocol Proxy System for AI Services (v5.0.3)
 
 <div align="center">
   <img src="public/icon.png" width="100" height="100" alt="Antigravity Tools Logo">
@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/github/v/release/lbjlaq/Antigravity-Manager?color=blue&style=flat-square" alt="GitHub release">
     </a>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.9.8-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-5.0.3-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -320,6 +320,27 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8045"
 claude
 ```
 
+### Native CLI Account Switcher (`at` / `antigravity-tools`)
+Antigravity includes a lightweight native CLI suite designed for terminal developers. It enables instant system Keychain credential rotation and seamless session continuation with `agy`:
+
+```bash
+# 1. List all accounts with status and active indicators (👉)
+at list
+
+# 2. Inspect currently active accounts across agy CLI (Keychain) and IDE
+at current
+
+# 3. Switch account (supports 1-based index, email, prefix, or alias)
+at switch 2                      # Switch to account #2
+at switch work@gmail.com         # Switch by email
+at switch work                   # Switch by email prefix
+at switch "WorkAccount"          # Switch by account name
+at switch                        # Auto round-robin to next normal account
+
+# 4. Switch and automatically resume agy session
+at switch 2 -c                   # -c is short for --continue
+```
+
 ### How to use with OpenCode?
 1. Go to **API Proxy** → **External Providers** → click the **OpenCode Sync** card.
 2. Click **Sync** to generate `~/.config/opencode/opencode.json`:
@@ -493,7 +514,7 @@ In clients that support OpenAI protocol (e.g., Cherry Studio), you can configure
 
 ## 📝 Changelog
 
-> Latest version **v4.9.8** (2026-10-17): Automatic seamless hot-switch for Antigravity Classic upon quota depletion or threshold breach with streamlined dual-pool cards (Ref #3509); native evolution supporting Antigravity CLI (`agy`) with automatic shell wrapper injection, thinking effort disassembly, and independent 3-client active account detection with contextual badges (Ref #3686, Ref #3630); comprehensive 403 error body capture and action URL extraction (captcha verification/appeal) with closed-loop self-healing recovery (Ref #3630, Ref #3684); Claude Code 2.1.301 protocol alignment with anti-WAF identity sanitization, full-link `request-id` injection, and Claude 5 model family integration (PR #3689, Ref #3684, Ref #3686); active reference tracking in JSON Schema recursive flattening to eliminate exponential replication and Linux VPS OOM (SIGKILL 137) crashes, array schema normalization with terminal ARRAY items guards to prevent Gemini 400 errors, adaptive first-chunk Peek timeout extension to 60s/90s/120s for reasoning models, zero-downtime atomic pool reload eliminating 503 errors, and anti-regression rate limit protection (PR #3694, Fixes #3690, Ref #3682, Ref #3693); complete removal of 100% 429-yielding Prod endpoints, relaxed streaming first-chunk watchdog to 120s baseline, multi-turn role preservation for Responses array inputs, and elimination of 0ms optimistic reset storms (PR #3691, PR #3672, PR #3687, PR #3685, Fixes #3506, Ref #3525); traffic monitor inspector overhaul with Postman-style single-tab view, structured vs raw code views, key-value headers tables with Bearer masking, standard dual-link HAR 1.2 export, and 12-language localization coverage (thanks to @cubelikeplayDaniel, @EricZhou05, @blackdm666, @jeikl).
+> Latest version **v5.0.3** (2026-11-06): Quota attribution governance and scheduling-core refactor — internal gateway throttling predicates converged into the single source of truth `policy::is_internal_gateway_exhaustion` (eradicating the 503 misattribution that accounted for 92.6% of all 5xx), plus a dedicated 403 ban attribution code `account_forbidden`; upstream-declared quota exhaustion is fully decoupled from the adaptive circuit breaker (so `QuotaExhausted` accounts stay locked even with the breaker disabled), retry loops now carry `attempted_accounts` to stop hammering the same exhausted account, and the positive-quota filter moved ahead of priority convergence to eliminate the zero-quota high-priority pool-starvation deadlock (Fixes #3838, #3841, PR #3845); pedal mode was rebuilt from hard disabling into top-priority competition, preserving Prompt Cache while spilling concurrency over automatically (PR #3840); the timeout contract removed the 135s/160s hard truncation, restoring a 180s first-byte baseline, a 270s multimodal ceiling, and a single pipeline-level global budget, with Codex / Legacy streams converged onto the shared lifecycle and adaptive thinking-phase promotion (Fixes #3816, #3821, Ref #3763); model routing now gives custom mappings absolute precedence, hard-retires legacy models with map-before-judge ordering, adds pool-adaptive dark routing, and converges the physical upstream model onto `X-Upstream-Model` (Fixes #2065, Ref #3764, #3769, #3815); 400 bad-image in-place self-healing with fingerprint blacklisting, default-on freshness sliding window, and Responses protocol log redaction plus vision-token accounting (Fixes #3758, #3824, #3756); prompt sanitization track separation preserving user text, adaptive CTF policy stripping, and inbound Gzip decompression (Fixes #3764, #3781); GCP Vertex AI enterprise accounts with one-click Project ID fetch, Antigravity IDE 2.6.0+ triple-write account switching with process-identity convergence, account deletion consistency, Web/Docker OAuth and update-settings fixes, and DeepSeek Harness one-click sync (Fixes #3823, #3829, #3806, #3802, #3754); Linux remote-desktop keep-alive, macOS Mini HUD main-thread scheduling, UI/font zoom and tray interaction polish (Fixes #3752, #3757, #3744); tool-signature cache write-amplification mitigation, token dual-perspective stats with TTFT, and QoS deadlock fixes (PR #3765, PR #3774, Fixes #3810, #3749); multi-agent root-session normalization with credential-level stickiness, and 3P phantom-quota governance (Fixes #3789, #3809).
 
 👉 **[View Full Changelog → CHANGELOG_EN.md](CHANGELOG_EN.md)**
 

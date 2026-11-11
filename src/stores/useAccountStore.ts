@@ -22,10 +22,11 @@ interface AccountState {
     reorderAccounts: (accountIds: string[]) => Promise<void>;
 
     // 新增 actions
-    startOAuthLogin: () => Promise<void>;
+    startOAuthLogin: (oauthClientKey?: string) => Promise<void>;
     completeOAuthLogin: () => Promise<void>;
     cancelOAuthLogin: () => Promise<void>;
     importV1Accounts: () => Promise<void>;
+    batchImportAccounts: (entries: accountService.ImportAccountEntry[]) => Promise<accountService.BatchImportResult>;
     importFromDb: () => Promise<void>;
     importFromCustomDb: (path: string) => Promise<void>;
     syncAccountFromDb: () => Promise<void>;
@@ -34,12 +35,57 @@ interface AccountState {
     warmUpAccount: (accountId: string) => Promise<string>;
     updateAccountLabel: (accountId: string, label: string) => Promise<void>;
     updateAccountPriority: (accountId: string, priority: number) => Promise<void>;
+    updateAccountProjectId: (accountId: string, projectId: string) => Promise<void>;
+    autoFetchAccountProjectId: (accountId: string) => Promise<string>;
 }
 
+const ACCOUNTS_CACHE_KEY = 'antigravity_accounts_cache';
+const CURRENT_ACCOUNT_CACHE_KEY = 'antigravity_current_account_cache';
+const ACTIVE_CLIENTS_CACHE_KEY = 'antigravity_active_clients_cache';
+
+const getInitialAccounts = (): Account[] => {
+    try {
+        const saved = localStorage.getItem(ACCOUNTS_CACHE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                return parsed;
+            }
+        }
+    } catch (_) {}
+    return [];
+};
+
+const getInitialCurrentAccount = (): Account | null => {
+    try {
+        const saved = localStorage.getItem(CURRENT_ACCOUNT_CACHE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed && typeof parsed === 'object') {
+                return parsed;
+            }
+        }
+    } catch (_) {}
+    return null;
+};
+
+const getInitialActiveClients = (): ActiveClientsStatus => {
+    try {
+        const saved = localStorage.getItem(ACTIVE_CLIENTS_CACHE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed && typeof parsed === 'object') {
+                return parsed;
+            }
+        }
+    } catch (_) {}
+    return {};
+};
+
 export const useAccountStore = create<AccountState>((set, get) => ({
-    accounts: [],
-    currentAccount: null,
-    activeClients: {},
+    accounts: getInitialAccounts(),
+    currentAccount: getInitialCurrentAccount(),
+    activeClients: getInitialActiveClients(),
     loading: false,
     error: null,
 
@@ -51,6 +97,10 @@ export const useAccountStore = create<AccountState>((set, get) => ({
                 accountService.listAccounts(),
                 accountService.getActiveClientsStatus().catch(() => ({} as ActiveClientsStatus))
             ]);
+            try {
+                localStorage.setItem(ACCOUNTS_CACHE_KEY, JSON.stringify(accounts));
+                localStorage.setItem(ACTIVE_CLIENTS_CACHE_KEY, JSON.stringify(activeClients));
+            } catch (_) {}
             set({ accounts, activeClients, loading: false });
         } catch (error) {
             console.error('[Store] Fetch accounts failed:', error);
@@ -65,6 +115,14 @@ export const useAccountStore = create<AccountState>((set, get) => ({
                 accountService.getCurrentAccount(),
                 accountService.getActiveClientsStatus().catch(() => ({} as ActiveClientsStatus))
             ]);
+            try {
+                if (account) {
+                    localStorage.setItem(CURRENT_ACCOUNT_CACHE_KEY, JSON.stringify(account));
+                } else {
+                    localStorage.removeItem(CURRENT_ACCOUNT_CACHE_KEY);
+                }
+                localStorage.setItem(ACTIVE_CLIENTS_CACHE_KEY, JSON.stringify(activeClients));
+            } catch (_) {}
             set({ currentAccount: account, activeClients, loading: false });
         } catch (error) {
             set({ error: String(error), loading: false });
@@ -194,10 +252,10 @@ export const useAccountStore = create<AccountState>((set, get) => ({
         }
     },
 
-    startOAuthLogin: async () => {
+    startOAuthLogin: async (oauthClientKey?: string) => {
         set({ loading: true, error: null });
         try {
-            await accountService.startOAuthLogin();
+            await accountService.startOAuthLogin(oauthClientKey);
             await get().fetchAccounts();
             set({ loading: false });
         } catch (error) {
@@ -233,6 +291,19 @@ export const useAccountStore = create<AccountState>((set, get) => ({
             await accountService.importV1Accounts();
             await get().fetchAccounts();
             set({ loading: false });
+        } catch (error) {
+            set({ error: String(error), loading: false });
+            throw error;
+        }
+    },
+
+    batchImportAccounts: async (entries: accountService.ImportAccountEntry[]) => {
+        set({ loading: true, error: null });
+        try {
+            const res = await accountService.batchImportAccounts(entries);
+            await get().fetchAccounts();
+            set({ loading: false });
+            return res;
         } catch (error) {
             set({ error: String(error), loading: false });
             throw error;
@@ -326,6 +397,37 @@ export const useAccountStore = create<AccountState>((set, get) => ({
             accounts: state.accounts.map(account => account.id === accountId ? { ...account, priority } : account),
             currentAccount: state.currentAccount?.id === accountId ? { ...state.currentAccount, priority } : state.currentAccount,
         }));
+    },
+
+    updateAccountProjectId: async (accountId, projectId) => {
+        await accountService.updateAccountProjectId(accountId, projectId);
+        set(state => ({
+            accounts: state.accounts.map(account =>
+                account.id === accountId
+                    ? { ...account, token: { ...account.token, project_id: projectId.trim() || undefined } }
+                    : account
+            ),
+            currentAccount:
+                state.currentAccount?.id === accountId
+                    ? { ...state.currentAccount, token: { ...state.currentAccount.token, project_id: projectId.trim() || undefined } }
+                    : state.currentAccount,
+        }));
+    },
+
+    autoFetchAccountProjectId: async (accountId) => {
+        const projectId = await accountService.autoFetchAccountProjectId(accountId);
+        set(state => ({
+            accounts: state.accounts.map(account =>
+                account.id === accountId
+                    ? { ...account, token: { ...account.token, project_id: projectId.trim() || undefined } }
+                    : account
+            ),
+            currentAccount:
+                state.currentAccount?.id === accountId
+                    ? { ...state.currentAccount, token: { ...state.currentAccount.token, project_id: projectId.trim() || undefined } }
+                    : state.currentAccount,
+        }));
+        return projectId;
     },
 
     updateAccountLabel: async (accountId: string, label: string) => {

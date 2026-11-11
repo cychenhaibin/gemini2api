@@ -1,5 +1,6 @@
 import i18n from '../i18n';
-import { Account, ActiveClientsStatus, DeviceProfile, DeviceProfileVersion, QuotaData } from '../types/account';
+import { Account, ActiveClientsStatus, DeviceProfile, DeviceProfileVersion, QuotaData, ImportAccountEntry, BatchImportResult } from '../types/account';
+export type { ImportAccountEntry, BatchImportResult };
 import { request as invoke } from '../utils/request';
 
 export async function updateAccountPriority(accountId: string, priority: number): Promise<void> {
@@ -23,8 +24,10 @@ export async function listAccounts(): Promise<Account[]> {
     if (response && typeof response === 'object' && Array.isArray(response.accounts)) {
         return response.accounts;
     }
-    // 否则直接返回响应内容（假设为数组）
-    return response || [];
+    if (Array.isArray(response)) {
+        return response;
+    }
+    return [];
 }
 
 export async function getCurrentAccount(): Promise<Account | null> {
@@ -42,6 +45,10 @@ export async function addAccount(email: string, refreshToken: string): Promise<A
 
 export async function deleteAccount(accountId: string): Promise<void> {
     return await invoke('delete_account', { accountId });
+}
+
+export async function releaseAccountQoSJail(accountId: string): Promise<void> {
+    return await invoke('release_account_qos_jail', { accountId });
 }
 
 export async function deleteAccounts(accountIds: string[]): Promise<void> {
@@ -113,6 +120,13 @@ export interface OAuthClientInfo {
     client_id: string;
     is_active: boolean;
     is_builtin: boolean;
+    is_gcp_tos?: boolean;
+}
+
+export async function prepareOAuthUrl(oauthClientKey?: string): Promise<string> {
+    const res = await invoke<any>('prepare_oauth_url', oauthClientKey ? { oauthClientKey } : undefined);
+    const url = typeof res === 'string' ? res : res?.url;
+    return url || '';
 }
 
 export async function listOAuthClients(): Promise<OAuthClientInfo[]> {
@@ -132,6 +146,10 @@ export async function setActiveOAuthClient(clientKey: string): Promise<void> {
 }
 
 // 导入
+export async function batchImportAccounts(entries: ImportAccountEntry[]): Promise<BatchImportResult> {
+    return await invoke<BatchImportResult>('batch_import_accounts', { entries });
+}
+
 export async function importV1Accounts(): Promise<Account[]> {
     return await invoke('import_v1_accounts');
 }
@@ -231,4 +249,13 @@ export async function exportAccounts(accountIds: string[]): Promise<ExportAccoun
 // 自定义标签相关
 export async function updateAccountLabel(accountId: string, label: string): Promise<void> {
     return await invoke('update_account_label', { accountId, label });
+}
+
+// GCP 项目 ID 相关
+export async function updateAccountProjectId(accountId: string, projectId: string | null): Promise<void> {
+    return await invoke('update_account_project_id', { accountId, projectId: projectId || null });
+}
+
+export async function autoFetchAccountProjectId(accountId: string): Promise<string> {
+    return await invoke('auto_fetch_account_project_id', { accountId });
 }

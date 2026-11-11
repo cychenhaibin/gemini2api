@@ -8,7 +8,9 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_current_account': { url: '/api/accounts/current', method: 'GET' },
   'switch_account': { url: '/api/accounts/switch', method: 'POST' },
   'add_account': { url: '/api/accounts', method: 'POST' },
+  'batch_import_accounts': { url: '/api/accounts/batch-import', method: 'POST' },
   'delete_account': { url: '/api/accounts/:accountId', method: 'DELETE' },
+  'release_account_qos_jail': { url: '/api/accounts/:accountId/release-qos', method: 'POST' },
   'delete_accounts': { url: '/api/accounts/bulk-delete', method: 'POST' },
   'fetch_account_quota': { url: '/api/accounts/:accountId/quota', method: 'GET' },
   'refresh_account_quota': { url: '/api/accounts/:accountId/quota', method: 'GET' },
@@ -57,6 +59,8 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_proxy_db_disk_size': { url: '/api/logs/disk-size', method: 'GET' },
   'clear_proxy_logs': { url: '/api/logs/clear', method: 'POST' },
   'clear_thinking_store': { url: '/api/proxy/thinking-store/clear', method: 'POST' },
+  'get_signature_cache_stats': { url: '/api/proxy/signature-cache/stats', method: 'GET' },
+  'clear_signature_cache': { url: '/api/proxy/signature-cache/clear', method: 'POST' },
   'get_thinking_store_count': { url: '/api/proxy/thinking-store/count', method: 'GET' },
   'get_proxy_log_detail': { url: '/api/logs/:logId', method: 'GET' },
 
@@ -135,6 +139,10 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'should_check_updates': { url: '/api/system/updates/check-status', method: 'GET' },
   'check_for_updates': { url: '/api/system/updates/check', method: 'POST' },
   'update_last_check_time': { url: '/api/system/updates/touch', method: 'POST' },
+  'check_hub_update': { url: '/api/system/hub/check-update', method: 'GET' },
+  'get_hub_fingerprint': { url: '/api/system/hub/fingerprint', method: 'GET' },
+  'detect_remote_hub_fingerprint': { url: '/api/system/hub/detect-fingerprint', method: 'POST' },
+  'get_effective_first_byte_timeouts': { url: '/api/system/timeouts/effective-first-byte', method: 'GET' },
 
   // OAuth
   'prepare_oauth_url': { url: '/api/auth/url', method: 'GET' },
@@ -213,6 +221,7 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
   }
 
   let url = mapping.url;
+
   // [FIX] 创建 args 副本，用于移除已使用的路径参数
   let bodyArgs = args ? { ...args } : undefined;
 
@@ -230,7 +239,9 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
     });
   }
 
-  const apiKey = typeof window !== 'undefined' ? sessionStorage.getItem('abv_admin_api_key') : null;
+  const apiKey = typeof window !== 'undefined'
+    ? (sessionStorage.getItem('abv_admin_api_key') || localStorage.getItem('abv_admin_api_key'))
+    : null;
 
   const options: RequestInit = {
     method: mapping.method,

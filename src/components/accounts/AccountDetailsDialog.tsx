@@ -11,74 +11,57 @@ interface AccountDetailsDialogProps {
     account: Account | null;
     onClose: () => void;
     onUpdatePriority: (accountId: string, priority: number) => Promise<void>;
+    onUpdateProjectId?: (accountId: string, projectId: string) => Promise<void>;
+    onAutoFetchProjectId?: (accountId: string) => Promise<string>;
 }
 
-export default function AccountDetailsDialog({ account, onClose, onUpdatePriority }: AccountDetailsDialogProps) {
+export default function AccountDetailsDialog({
+    account,
+    onClose,
+    onUpdatePriority,
+    onUpdateProjectId,
+    onAutoFetchProjectId,
+}: AccountDetailsDialogProps) {
     const { t } = useTranslation();
     const [activeTab, setActiveTab] = useState<'basic' | 'detailed'>('basic');
     const [priorityInput, setPriorityInput] = useState('50');
     const [savingPriority, setSavingPriority] = useState(false);
-
-    const tier = useMemo(() => account ? getAccountTier(account) : 'free', [account]);
-    const isProOrUltra = tier === 'pro' || tier === 'ultra';
+    const [projectIdInput, setProjectIdInput] = useState('');
+    const [savingProjectId, setSavingProjectId] = useState(false);
+    const [fetchingProjectId, setFetchingProjectId] = useState(false);
 
     const displayGroups = useMemo(() => {
-        let groups = account?.quota?.quota_groups || [];
-        const hasArgonGroup = groups.some(g =>
-            (g.display_name || '').toLowerCase().includes('argon')
-            || (g.buckets || []).some(b => (b.bucket_id || '').toLowerCase().includes('argon'))
-        );
-        if (isProOrUltra && !hasArgonGroup) {
-            const geminiGroup = groups.find(g => (g.display_name || '').toLowerCase().includes('gemini'));
-            const geminiWeeklyBucket = geminiGroup?.buckets?.find(b =>
-                (b.window || '').toLowerCase().includes('week') || (b.bucket_id || '').toLowerCase().includes('week')
-            );
-            groups = [
-                ...groups,
-                {
-                    display_name: 'Gemini 4 Argon',
-                    description: 'Models within this group: Gemini 4 Argon',
-                    buckets: [
-                        {
-                            bucket_id: 'argon-weekly',
-                            window: 'weekly',
-                            remaining_fraction: 1.0,
-                            reset_time: geminiWeeklyBucket?.reset_time || new Date(Date.now() + 6 * 24 * 3600 * 1000 + 20 * 3600 * 1000).toISOString(),
-                            display_name: 'Gemini 4 Argon Weekly Limit'
-                        }
-                    ]
-                }
-            ];
-        }
-        return groups;
-    }, [account?.quota?.quota_groups, isProOrUltra]);
+        return account?.quota?.quota_groups || [];
+    }, [account?.quota?.quota_groups]);
 
     const displayModels = useMemo(() => {
-        let models = account?.quota?.models || [];
-        const hasArgonModel = models.some(m => m.name.toLowerCase().includes('argon'));
-        if (isProOrUltra && !hasArgonModel) {
-            const geminiModel = models.find(m => m.name.toLowerCase().startsWith('gemini'));
-            models = [
-                ...models,
-                {
-                    name: 'gemini-4-argon',
-                    display_name: 'Gemini 4 Argon',
-                    percentage: 100,
-                    reset_time: geminiModel?.reset_time || '',
-                    supports_images: true,
-                    supports_thinking: true,
-                    recommended: true,
-                    max_tokens: 1048576,
-                    max_output_tokens: 65536,
-                }
-            ];
-        }
-        return models;
-    }, [account?.quota?.models, isProOrUltra]);
+        const models = account?.quota?.models || [];
+        return models.filter(m => {
+            const name = (m.name || '').trim().toLowerCase();
+            if (
+                name.startsWith('chat_') ||
+                name.startsWith('tab_') ||
+                name.includes('internal') ||
+                name.includes('-exp') ||
+                name.endsWith('-agent') ||
+                name === 'gemini-3-flash' ||
+                name.includes('2.5') ||
+                name.includes('2-5') ||
+                name.includes('3.5-flash-low') ||
+                name.includes('3.5-flash-extra-low') ||
+                name.includes('3.6-flash') ||
+                name.includes('3.7-flash')
+            ) {
+                return false;
+            }
+            return true;
+        });
+    }, [account?.quota?.models]);
 
     useEffect(() => {
         setPriorityInput(String(account?.priority ?? 50));
-    }, [account?.id, account?.priority]);
+        setProjectIdInput(account?.token?.project_id || '');
+    }, [account?.id, account?.priority, account?.token?.project_id]);
 
     if (!account) return null;
 
@@ -96,6 +79,42 @@ export default function AccountDetailsDialog({ account, onClose, onUpdatePriorit
             showToast(`${t('common.error')}: ${error}`, 'error');
         } finally {
             setSavingPriority(false);
+        }
+    };
+
+    const saveProjectId = async () => {
+        if (!onUpdateProjectId) return;
+        setSavingProjectId(true);
+        try {
+            await onUpdateProjectId(account.id, projectIdInput.trim());
+            showToast(t('accounts.project_id_updated', 'GCP Project ID 已更新'), 'success');
+        } catch (error) {
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        } finally {
+            setSavingProjectId(false);
+        }
+    };
+
+    const autoFetchProjectId = async () => {
+        if (!onAutoFetchProjectId) return;
+        setFetchingProjectId(true);
+        try {
+            const fetched = await onAutoFetchProjectId(account.id);
+            setProjectIdInput(fetched);
+            showToast(
+                t('accounts.auto_fetch_success', {
+                    defaultValue: '成功自动获取 Project ID: {{projectId}}',
+                    projectId: fetched,
+                }),
+                'success'
+            );
+        } catch (error) {
+            showToast(
+                `${t('accounts.auto_fetch_failed', '未能在上游找到关联的 Project ID')}: ${error}`,
+                'error'
+            );
+        } finally {
+            setFetchingProjectId(false);
         }
     };
 
@@ -191,6 +210,59 @@ export default function AccountDetailsDialog({ account, onClose, onUpdatePriorit
                         </div>
                     </div>
 
+                    {/* GCP Project ID 设置 */}
+                    <div className="p-4 rounded-xl border border-gray-100 dark:border-base-200 bg-gray-50/50 dark:bg-base-200/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                            <div className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                                <span>{t('accounts.project_id', 'GCP Project ID')}</span>
+                                {account.token?.project_id ? (
+                                    <span className="text-xs px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-mono font-semibold">
+                                        {account.token.project_id}
+                                    </span>
+                                ) : (
+                                    <span className="text-xs px-2 py-0.5 rounded-md bg-gray-200 dark:bg-base-300 text-gray-600 dark:text-gray-400 font-mono">
+                                        {t('common.none', 'None')}
+                                    </span>
+                                )}
+                            </div>
+                            <p className="mt-1 text-xs text-gray-400 dark:text-gray-500 leading-relaxed max-w-md">
+                                {t('accounts.project_id_hint', 'Google Cloud Project ID associated with the enterprise/GCP account. Native Antigravity associates or defaults this upon sign-in.')}
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2 self-start sm:self-auto shrink-0 flex-wrap">
+                            <input
+                                id="account-project-id"
+                                type="text"
+                                placeholder={t('accounts.project_id_placeholder', 'e.g. my-project-id')}
+                                className="input input-bordered input-sm w-36 sm:w-44 font-mono text-xs"
+                                value={projectIdInput}
+                                disabled={savingProjectId || fetchingProjectId}
+                                onChange={event => setProjectIdInput(event.target.value)}
+                            />
+                            {onAutoFetchProjectId && (
+                                <button
+                                    className="btn btn-outline btn-sm px-2.5 text-xs"
+                                    onClick={autoFetchProjectId}
+                                    disabled={savingProjectId || fetchingProjectId}
+                                    title={t('accounts.auto_fetch_project_id', '自动获取')}
+                                >
+                                    {fetchingProjectId ? (
+                                        <span className="loading loading-spinner loading-xs" />
+                                    ) : (
+                                        t('accounts.auto_fetch_project_id', '自动获取')
+                                    )}
+                                </button>
+                            )}
+                            <button
+                                className="btn btn-primary btn-sm px-3 text-xs"
+                                onClick={saveProjectId}
+                                disabled={savingProjectId || fetchingProjectId || projectIdInput.trim() === (account.token?.project_id || '')}
+                            >
+                                {savingProjectId ? t('common.saving') : t('common.save')}
+                            </button>
+                        </div>
+                    </div>
+
                     {/* Protected Models Section */}
                     {account.protected_models && account.protected_models.length > 0 && (
                         <div className="p-4 rounded-xl border border-amber-100 dark:border-amber-900/30 bg-amber-50/40 dark:bg-amber-950/20">
@@ -267,13 +339,16 @@ export default function AccountDetailsDialog({ account, onClose, onUpdatePriorit
                                                                 {label}
                                                             </span>
                                                         </div>
-                                                        {model.thinking_budget !== undefined && (
-                                                            <div className="mt-1 flex items-center gap-1">
+                                                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                                                            <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded border border-blue-200/50 dark:border-blue-800/40">
+                                                                {model.name}
+                                                            </span>
+                                                            {model.thinking_budget !== undefined && (
                                                                 <span className="text-[10px] text-gray-500 dark:text-gray-400 font-mono bg-gray-100 dark:bg-base-200 px-1.5 py-0.5 rounded border border-gray-200/50 dark:border-base-300">
                                                                     {t('accounts.details.thinking_budget', '思考预算')}: <span className="font-bold text-gray-700 dark:text-gray-300">{model.thinking_budget}</span>
                                                                 </span>
-                                                            </div>
-                                                        )}
+                                                            )}
+                                                        </div>
                                                     </div>
                                                     <span className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-md shrink-0 ${badgeColor}`}>
                                                         {model.percentage}%

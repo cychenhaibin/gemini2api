@@ -38,6 +38,75 @@ pub(crate) fn has_explicit_quota_exhausted(body: &str) -> bool {
     body.to_ascii_uppercase().contains("QUOTA_EXHAUSTED")
 }
 
+/// 统一判定“账号配额桶已真实耗尽”的信号。
+///
+/// 四类配额桶（Argon 独立桶 / Ultra 共享大桶 / 普通 Gemini 大桶 / 3P 桶）
+/// 上游下发的 429 报文结构完全一致，均不含桶标识；桶归属只能由
+/// `model -> quota_group` 映射决定（见 `modules/quota.rs`），本函数只负责
+/// 第一个问题：**这次 429 是不是“配额桶耗尽”，而不是瞬态速率限制**。
+///
+/// 判定优先级：
+/// 1. 文案信号（大小写不敏感）：“Individual quota reached” / “check quota”
+///    —— 必须保留，这是 1.5% 木桶效应的触发入口（Fixes #3841）；
+///    删除会导致低配额账号反复以 300s 退避重试，形成死锁。
+/// 2. 结构化确认：`QUOTA_EXHAUSTED` reason / `quotaResetDelay` / `quotaResetTimeStamp`
+///    —— 四类桶都会下发，是最稳健的判据。
+/// 3. 其他明确措辞（exceeded your current quota / insufficient_quota）。
+///
+/// 注意：不包含裸 `quota` 或裸 `exhausted`。`resource has been exhausted`
+/// 属 Google 通用瞬态流控（TPM/并发），若升级为硬配额会触发全池级联锁定（Fixes #3506）。
+pub(crate) fn is_quota_depleted_signal(body: &str) -> bool {
+    let lower = body.to_lowercase();
+
+    // 1. 文案信号（1.5% 木桶触发入口，不可删除）
+    if lower.contains("individual quota reached") || lower.contains("check quota") {
+        return true;
+    }
+
+    // 2. 结构化确认（四类桶通用）
+    if lower.contains("\"quota_exhausted\"")
+        || lower.contains("quotaresetdelay")
+        || lower.contains("quotaresettimestamp")
+    {
+        return true;
+    }
+
+    // 3. 其他明确措辞
+    lower.contains("quota exceeded")
+        || lower.contains("exceeded your current quota")
+        || lower.contains("insufficient_quota")
+}
+
+/// 从 429 报文中提取上游权威的配额重置时间戳（RFC3339 字符串）。
+///
+/// 为什么需要它：实测四类配额桶（Argon 独立桶 / Ultra 共享大桶 / 普通 Gemini 大桶 /
+/// 3P 桶）耗尽时的 429 报文**结构完全一致且不含桶标识**，但都会在
+/// `details[].metadata.quotaResetTimeStamp` 里直接给出官方恢复时刻。
+/// 采信它比“本地桶余量 <= 1.5%”的推算更可靠，也不会因上游改文案而失效。
+///
+/// 递归查找（不依赖 details 数组固定下标与 `@type` 顺序），兼容
+/// `quotaResetTimeStamp` 出现在任意嵌套层级的上游变体。
+pub(crate) fn extract_quota_reset_timestamp(body: &str) -> Option<i64> {
+    fn walk(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(ts) = map.get("quotaResetTimeStamp").and_then(|v| v.as_str()) {
+                    return Some(ts);
+                }
+                map.values().find_map(walk)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(walk),
+            _ => None,
+        }
+    }
+
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let ts = walk(&json)?;
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
 pub(crate) fn is_active_persisted_long_limit(
     _model_key: &str,
     status: &crate::models::account::LiveLimitStatus,
@@ -173,6 +242,44 @@ impl RateLimitTracker {
             .map(|duration| (duration.as_millis().saturating_add(999) / 1000) as u64)
             .max()
             .unwrap_or(0)
+    }
+
+    /// 当自适应熔断退避开关关闭时，依然坚定检查账号是否处于明确的配额耗尽锁定或周硬配额限制中
+    pub fn is_quota_exhausted_or_explicit_limited(
+        &self,
+        account_id: &str,
+        model: Option<&str>,
+    ) -> bool {
+        let now = SystemTime::now();
+
+        // 1. 周硬配额检查 (快照同步)
+        if self.get_quota_wait(account_id, model, true) > 0 {
+            return true;
+        }
+
+        // 2. 检查直接 key 是否处于 QuotaExhausted 锁定中
+        let direct_key = self.get_limit_key(account_id, model);
+        if let Some(info) = self.limits.get(&direct_key) {
+            if info.reset_time > now && info.reason == RateLimitReason::QuotaExhausted {
+                return true;
+            }
+        }
+
+        // 3. 归一化标准 ID 兜底检查
+        if let Some(m) = model {
+            if let Some(std_id) = crate::proxy::common::model_mapping::normalize_to_standard_id(m) {
+                if std_id != m {
+                    let std_key = self.get_limit_key(account_id, Some(&std_id));
+                    if let Some(info) = self.limits.get(&std_key) {
+                        if info.reset_time > now && info.reason == RateLimitReason::QuotaExhausted {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     pub fn sync_quota_bucket(
@@ -452,13 +559,12 @@ impl RateLimitTracker {
         parser_mode: RetryParserMode,
     ) -> Option<RateLimitInfo> {
         // 关键防御：网关内部自产生的排队/无可用账号错误，绝对禁止解析为上游限流，杜绝自噬死循环
-        let lower_body = body.to_lowercase();
-        if lower_body.contains("all accounts limited")
-            || lower_body.contains("no accounts available")
-            || lower_body.contains("all accounts failed")
-            || lower_body.contains("token pool is empty")
-            || lower_body.contains("all accounts exhausted")
-            || lower_body.contains("all accounts unhealthy")
+        // 同时无条件豁免网关自答哨兵（model not exist / no quota accounts）：它们不从属于任何账号。
+        // 判据统一收敛到 UpstreamClassification::is_internal_gateway_exhaustion，保持单一权威源。
+        if crate::proxy::common::model_gate::is_gateway_self_answer(body)
+            || crate::proxy::pipeline::UpstreamClassification::is_internal_gateway_exhaustion(
+                &body.to_lowercase(),
+            )
         {
             return None;
         }
@@ -481,9 +587,16 @@ impl RateLimitTracker {
                 crate::proxy::upstream::retry::parse_retry_delay(body, retry_after_header)
                     .map(|delay_ms| delay_ms.saturating_add(999) / 1000)
             }
-            RetryParserMode::Baseline => retry_after_header
-                .and_then(|value| value.parse::<u64>().ok())
-                .or_else(|| self.parse_retry_time_from_body_baseline(body)),
+            RetryParserMode::Baseline => {
+                let header_sec = retry_after_header.and_then(|value| value.parse::<u64>().ok());
+                let body_sec = self.parse_retry_time_from_body_baseline(body);
+                match (header_sec, body_sec) {
+                    (Some(h), Some(b)) => Some(std::cmp::max(h, b)),
+                    (Some(h), None) => Some(h),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            }
         };
         let has_explicit_retry_time = retry_after_sec.is_some();
         let preserve_explicit_quota = parser_mode == RetryParserMode::Current
@@ -686,6 +799,11 @@ impl RateLimitTracker {
                     .and_then(|d| d.as_array())
                 {
                     for item in details {
+                        if let Some(typ) = item.get("@type").and_then(|v| v.as_str()) {
+                            if typ.contains("QuotaFailure") {
+                                return RateLimitReason::QuotaExhausted;
+                            }
+                        }
                         if let Some(reason_str) = item.get("reason").and_then(|v| v.as_str()) {
                             match reason_str {
                                 "QUOTA_EXHAUSTED" => return RateLimitReason::QuotaExhausted,
@@ -779,17 +897,21 @@ impl RateLimitTracker {
         let trimmed = body.trim();
         if trimmed.starts_with('{') || trimmed.starts_with('[') {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if let Some(delay) = json
+                if let Some(details) = json
                     .get("error")
                     .and_then(|error| error.get("details"))
                     .and_then(|details| details.as_array())
-                    .and_then(|details| details.first())
-                    .and_then(|detail| detail.get("metadata"))
-                    .and_then(|metadata| metadata.get("quotaResetDelay"))
-                    .and_then(|value| value.as_str())
-                    .and_then(|value| self.parse_duration_string_baseline(value))
                 {
-                    return Some(delay);
+                    for detail in details {
+                        if let Some(delay) = detail
+                            .get("metadata")
+                            .and_then(|metadata| metadata.get("quotaResetDelay"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| self.parse_duration_string_baseline(value))
+                        {
+                            return Some(delay);
+                        }
+                    }
                 }
                 if let Some(retry) = json
                     .get("error")
@@ -797,6 +919,16 @@ impl RateLimitTracker {
                     .and_then(|value| value.as_u64())
                 {
                     return Some(retry);
+                }
+            }
+        }
+
+        if let Ok(re) = Regex::new(r"(?i)resets in ([^.,;\]\n]+)") {
+            if let Some(caps) = re.captures(body) {
+                if let Some(dur_str) = caps.get(1).map(|m| m.as_str()) {
+                    if let Some(dur) = self.parse_duration_string_baseline(dur_str) {
+                        return Some(dur);
+                    }
                 }
             }
         }
@@ -1188,6 +1320,84 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_quota_reset_timestamp_covers_all_bucket_classes() {
+        // 四类桶（Argon / Ultra 共享 / 普通 Gemini / 3P）的 429 均携带该字段，
+        // 结构可能不同，必须能递归找到。
+        let argon = r#"{"error":{"details":[{"reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-4-argon-high","quotaResetTimeStamp":"2026-11-07T03:50:37Z"}}]}}"#;
+        assert!(extract_quota_reset_timestamp(argon).is_some());
+
+        // 嵌套更深的变体（ErrorInfo 不在 details[0]）
+        let nested = r#"{"error":{"details":[{"@type":"x"},{"metadata":{"quotaResetTimeStamp":"2026-11-07T00:56:31Z"}}]}}"#;
+        let ts = extract_quota_reset_timestamp(nested).expect("nested must be found");
+        assert!(ts > 0);
+
+        // 无该字段：必须返回 None（交给 L2/L3 兜底）
+        assert!(extract_quota_reset_timestamp(
+            r#"{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}"#
+        )
+        .is_none());
+
+        // 非法时间格式：不能 panic，必须返回 None
+        assert!(extract_quota_reset_timestamp(r#"{"quotaResetTimeStamp":"not-a-date"}"#).is_none());
+
+        // 非 JSON（纯文本错误）：返回 None
+        assert!(extract_quota_reset_timestamp("Service Unavailable").is_none());
+    }
+
+    #[test]
+    fn test_is_quota_depleted_signal_covers_all_four_bucket_classes() {
+        // 四类配额桶（Argon 独立桶 / Ultra 共享大桶 / 普通 Gemini 大桶 / 3P 桶）
+        // 的上游 429 报文结构一致，本判据必须全部命中。
+
+        // 1) Argon 独立桶（实测 vanskou666 argon=0%）
+        let argon = r#"{"error":{"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 40h17m7s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-4-argon-high","quotaResetDelay":"40h17m7s","quotaResetTimeStamp":"2026-11-07T03:50:37Z"}}]}}"#;
+        assert!(is_quota_depleted_signal(argon), "argon bucket");
+
+        // 2) 大小写变体（上游文案变动时不能漏判）
+        assert!(
+            is_quota_depleted_signal("INDIVIDUAL QUOTA REACHED. Resets in 2h."),
+            "uppercase must match"
+        );
+
+        // 3) 普通 Gemini 大桶 / Ultra 共享桶 —— 只有结构化字段
+        assert!(
+            is_quota_depleted_signal(r#"{"error":{"details":[{"reason":"QUOTA_EXHAUSTED"}]}}"#),
+            "structured reason"
+        );
+        assert!(
+            is_quota_depleted_signal(r#"{"quotaResetTimeStamp":"2026-11-07T03:50:37Z"}"#),
+            "reset timestamp only"
+        );
+
+        // 4) 3P 桶（claude/gpt）
+        assert!(
+            is_quota_depleted_signal("You exceeded your current quota, please check your plan."),
+            "3p bucket"
+        );
+        assert!(
+            is_quota_depleted_signal("insufficient_quota"),
+            "3p bucket alt"
+        );
+
+        // 5) 1.5% 木桶触发入口必须保留（Fixes #3841）
+        assert!(
+            is_quota_depleted_signal("Resource has been exhausted (e.g. check quota)."),
+            "check quota is the 1.5% bucket trigger and must stay"
+        );
+    }
+
+    #[test]
+    fn test_is_quota_depleted_signal_rejects_transient_rate_limits() {
+        // Google 通用瞬态流控绝不能被升级为硬配额，否则触发全池级联锁定（Fixes #3506）
+        assert!(!is_quota_depleted_signal(
+            "Rate limit exceeded for Tokens per minute"
+        ));
+        assert!(!is_quota_depleted_signal("429 Too Many Requests"));
+        assert!(!is_quota_depleted_signal("Service Unavailable"));
+        assert!(!is_quota_depleted_signal(""));
+    }
+
+    #[test]
     fn test_generic_resource_exhausted_is_short_rate_limit() {
         let tracker = RateLimitTracker::new();
         let body = r#"{
@@ -1438,6 +1648,50 @@ mod tests {
             reason,
             RateLimitReason::QuotaExhausted,
             "未扫描全部 details 导致漏判 index > 0 的 ErrorInfo"
+        );
+    }
+
+    #[test]
+    fn test_baseline_parser_multi_details_and_header_max() {
+        let tracker = RateLimitTracker::new();
+        let body = r#"{
+            "error": {
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "RATE_LIMIT_EXCEEDED"
+                    },
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "metadata": {
+                            "quotaResetDelay": "3600s"
+                        }
+                    }
+                ]
+            }
+        }"#;
+        // 1. parse_retry_time_from_body_baseline 必须遍历全部 details，不能只查 details.first()
+        let parsed = tracker.parse_retry_time_from_body_baseline(body);
+        assert_eq!(
+            parsed,
+            Some(3600),
+            "Should parse quotaResetDelay from non-first details entry"
+        );
+
+        // 2. Baseline 模式下，当有 8s 防 DDoS Header 与 3600s Body 时，必须选取 max(8, 3600) = 3600s
+        let info = tracker
+            .parse_from_error_baseline(
+                "acc-multi-detail",
+                429,
+                Some("8"),
+                body,
+                None,
+                &[60, 300, 7200],
+            )
+            .unwrap();
+        assert_eq!(
+            info.retry_after_sec, 3600,
+            "Baseline mode must prioritize max(8s, 3600s) = 3600s"
         );
     }
 }
