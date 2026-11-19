@@ -3,6 +3,27 @@
 > 完整版本历史记录。返回项目主页请查看 [README_ZH.md](README_ZH.md) | [English Changelog](CHANGELOG_EN.md)。
 
 *   **版本演进**:
+    *   **v5.0.4-beta.17 (2026-11-19)**:
+        -   **[上游长文本 KV 缓存就绪防竞争与平滑自适应延迟]**:
+            -   **巨型冷请求完成感知与异步落盘平滑窗口**: 针对 Agent 连续高频调用或自动化工具链中，首轮巨型长文本（`input_tokens >= 16,000`）冷请求刚完成计算、次轮请求在毫秒级瞬间到达上游导致 Google 分布式 KV Cache 尚未落盘即判定为 Cache Miss 的时序竞争问题，在 Pipeline 统一出站阶段引入「KV 缓存就绪防竞争延迟（Cache Settling Grace Window）」。自动感知同会话巨型冷启动完成时间，在时间差不足落盘窗口时自适应微调等待（默认 1000ms），使紧随其后的次轮请求稳定命中 90%+ 的前缀 KV 缓存。
+            -   **全平台配置面与 12 国多语言支持 (Config Surface Parity)**: 在调度配置 `StickySessionConfig` 中新增 `cache_settling_delay_ms` 字段，支持环境变量 `ANTIGRAVITY_CACHE_SETTLING_DELAY_MS` / `ABV_CACHE_SETTLING_DELAY_MS` 无缝覆盖；前端在「会话与调度配置」面板中增加微调输入框（范围 0–5000ms，设为 0 即关闭），并补齐中文、繁体、英文、日语、韩语、西语、葡语、俄语、土耳其语、越南语、阿拉伯语与缅甸语共 12 种语言国际化。
+
+    *   **v5.0.4-beta.16 (2026-11-18)**:
+        -   **[在线更新与 Homebrew 双轨自由切换与通道即时联动]**:
+            -   **更新通道即时联动与后端参数透传**: `check_for_updates` 指令与 Axum 管理接口全面支持显式透传 `channel` 参数，前端点击切换【正式版 / 预览版】后立即持久化并以新通道自动触发更新检查，彻底消除跨通道检查的时序延迟与旧值覆盖。
+            -   **Homebrew 与原生在线更新双轨自由切换**: 针对 Homebrew Cask 安装的用户，在提供便捷 `brew upgrade` 的同时，增加「改用应用内在线更新」直达入口，随时支持切换回原生自动下载更新；当选择预览版通道时，系统自动无缝使用原生在线热更。
+            -   **设置页更新通道入口优化**: 在“通用设置 -> 自动检查更新”区域同步透出【更新通道】切换卡片，无需跳转至“关于”页即可直观切换正式版与预览版。
+        -   **[出口 IP 地区不支持假 403 误杀防御与一键解封测活] (Ref #3995)**:
+            -   **地区不支持 403 账号级保护**: 针对代理节点临时漂移或地区不支持（`Location not supported` / `UNSUPPORTED_LOCATION`）被上游下发 403 的场景，在 OpenAI / Claude / Gemini 适配器与账号模型冻结层增加特征拦截守卫，将其准确识别为代理网络层问题，严禁无差别将账号标记为 `proxy_disabled` 或模型锁定，避免优质账号被永久误杀。(Ref #3995)
+            -   **一键清除 403 锁定与自动测活**: 新增 `clear_account_forbidden` 后端指令与状态复位引擎，解除系统 403 与临时冻结；在前端错误弹窗（`AccountErrorDialog`）为受限账号提供「清除 403 标记并重新测活」通道，告别手动修改本地配置文件的繁琐操作。(Ref #3995)
+            -   **缺失验证链接 403 兜底 Google 官方申诉表单**: 针对上游仅返回 `TOS_VIOLATION` 或账号封锁但未携带动态验证 URL 的情况，弹窗自动兜底提供 Google Cloud Code 官方服务申诉表单（`https://forms.gle/hGzM9MEUv2azZsrb9`），为用户建立清晰明确的解封自救指引。(Ref #3995)
+        -   **[Windows 轻量模式主窗口恢复 RwLock 死锁修复] (Fixes #3993, PR #3996, Thanks to @koeria)**:
+            -   **跳过主窗口初始化自动恢复避免同线程重入死锁**: 在 `tauri-plugin-window-state` 初始化时配置 `.skip_initial_state("main")`，禁止窗口在 `WebviewWindow::build` 内部由 `on_window_ready` 同步触发状态恢复。根除 Windows 平台下 `SetWindowPos` 派发 `WM_WINDOWPOSCHANGED` 同步重入 tao 事件循环并在尚未释放 `WindowManager` / `PluginStore` 锁时再次申请非重入读写锁导致的托盘和 UI 无响应死锁。(Fixes #3993, PR #3996, Thanks to @koeria)
+            -   **轻量模式窗口重建后异步解耦恢复状态**: 启动窗口状态恢复显式收敛至 `setup` 构造完成后执行；轻量模式下销毁再建时，通过独立工作线程跳板派发至主线程队列（规避 `run_on_main_thread` 在当前主线程内就地执行无法让渡托盘与单实例回调插件锁的问题），确保窗口状态恢复与单实例激活路径彻底解耦锁持有生命周期。(Fixes #3993, PR #3996, Thanks to @koeria)
+        -   **[系统提示词隐身侧载跨轮次幂等加固与前缀换行规范化] (Fixes #3994)**:
+            -   **隐身侧载全 Parts 容器扫描与防重复注入**: 增强 `InboundThinkingPipeline::sideload_system_instruction_if_needed` 中的已注入状态判定逻辑，由单一检查 `contents[0].parts[0]` 开头放宽为全面扫描 `contents[0].parts` 中所有文本块，避免多轮会话或客户端重组 parts 时重复插入 `<system-instruction>` 容器破坏 Google 上游前缀哈希。(Fixes #3994)
+            -   **侧载指令字节级确定性换行对齐**: 在侧载封装前对系统指令执行确定性换行规范化（`replace("\r\n", "\n")`），消除跨平台 Windows CRLF 与 Unix LF 混用导致的前缀微小字节偏移，确保在开启隐身侧载模式下连续多轮对话达成 90%+ 的极致 KV Cache 复用率。(Fixes #3994)
+
     *   **v5.0.4-beta.15 (2026-11-18)**:
         -   **[配额查询端点对齐与耗尽模型 0% 兜底判定修复] (Fixes #3987, PR #3988, PR #3989, Thanks to @vecyang1)**:
             -   **配额接口移除 Prod 端点对齐推理链路**: 从 `QUOTA_API_ENDPOINTS` 与 `QUOTA_SUMMARY_ENDPOINTS` 中移除推理链路早已弃用的 `cloudcode-pa.googleapis.com`（Prod），统一收敛为 `Daily -> Sandbox` 并新增跨模块主机集合一致性单测断言，根治 Daily 瞬态波动回退至 Prod 读取失真 Gemini 配额导致面板额度在 `100% / 0%` 间反复跳变及误调度已耗尽账号触发 `429 QUOTA_EXHAUSTED` 的问题。(Fixes #3987, PR #3988, Thanks to @vecyang1)
